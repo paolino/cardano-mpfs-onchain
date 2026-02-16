@@ -10,10 +10,14 @@ import { waitForYaci, initLucid, createTestWallet } from "./setup.js";
 import { loadValidator } from "./blueprint.js";
 import {
   encodeStateDatum,
+  encodeRequestDatum,
+  encodeDeleteRequestDatum,
   encodeMintRedeemer,
   encodeMigratingRedeemer,
   encodeBurningRedeemer,
   encodeEndRedeemer,
+  encodeModifyRedeemer,
+  encodeContributeRedeemer,
 } from "./codec.js";
 
 // Use Ogmios for script evaluation instead of local UPLC
@@ -37,6 +41,15 @@ function computeAssetName(txHash: string, outputIndex: number): string {
 // This is the null_hash constant: 32 bytes of zeros.
 const EMPTY_ROOT =
   "0000000000000000000000000000000000000000000000000000000000000000";
+
+// Non-empty MPF root after inserting key "42" value "42" (hex "3432"/"3432")
+// into an empty trie with an empty proof []. Known from Aiken unit tests.
+const MODIFIED_ROOT =
+  "484dee386bcb51e285896271048baf6ea4396b2ee95be6fd29a92a0eeb8462ea";
+
+// Key and value for the Insert operation (hex encoding of UTF-8 "42")
+const INSERT_KEY = "3432";
+const INSERT_VALUE = "3432";
 
 describe("MPF Cage Migration E2E", () => {
   let lucid: LucidEvolution;
@@ -121,7 +134,7 @@ describe("MPF Cage Migration E2E", () => {
     expect(remaining).toBeUndefined();
   });
 
-  it("full migration from version 0 to version 1", async () => {
+  it("migration preserves non-empty MPF root", async () => {
     const v0 = loadValidator(0);
     const v1 = loadValidator(1);
 
@@ -165,31 +178,95 @@ describe("MPF Cage Migration E2E", () => {
     );
     expect(v0StateUtxo).toBeDefined();
 
-    // --- MIGRATE v0 -> v1 ---
-    // Single atomic transaction:
-    // 1. Spend v0 State UTxO with End redeemer
-    // 2. Burn v0 token with Burning redeemer
-    // 3. Mint v1 token with Migrating redeemer
-    // 4. Output to v1 script address with same root
+    // --- CREATE REQUEST UTxO ---
+    // Send a Request UTxO to the v0 script address with an Insert operation.
+    // This creates a pending request to insert key "42" value "42" into the MPF.
+    const requestDatum = encodeRequestDatum(
+      assetName,
+      ownerKeyHash,
+      INSERT_KEY,
+      INSERT_VALUE,
+    );
+
+    const createRequestTx = await lucid
+      .newTx()
+      .pay.ToContract(
+        v0.scriptAddress,
+        { kind: "inline", value: requestDatum },
+        { lovelace: 2_000_000n },
+      )
+      .complete(COMPLETE_OPTS);
+
+    const signedRequest = await createRequestTx.sign.withWallet().complete();
+    const requestHash = await signedRequest.submit();
+    expect(requestHash).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Find the Request UTxO (the one without the cage token)
+    const v0UtxosAfterRequest = await lucid.utxosAt(v0.scriptAddress);
+    const requestUtxo = v0UtxosAfterRequest.find(
+      (u) => u.assets[v0Unit] !== 1n && u.datum === requestDatum,
+    );
+    expect(requestUtxo).toBeDefined();
+
+    // Re-fetch the State UTxO (might have changed index)
+    const stateUtxoForModify = v0UtxosAfterRequest.find(
+      (u) => u.assets[v0Unit] === 1n,
+    );
+    expect(stateUtxoForModify).toBeDefined();
+
+    // --- MODIFY on v0 ---
+    // Spend State UTxO (Modify redeemer) + Request UTxO (Contribute redeemer)
+    // to fold the Insert request into the MPF, producing a non-empty root.
+    const modifyRedeemer = encodeModifyRedeemer([[]]);
+    const contributeRedeemer = encodeContributeRedeemer(stateUtxoForModify!);
+    const modifiedDatum = encodeStateDatum(ownerKeyHash, MODIFIED_ROOT);
+
+    const modifyTx = await lucid
+      .newTx()
+      .collectFrom([stateUtxoForModify!], modifyRedeemer)
+      .collectFrom([requestUtxo!], contributeRedeemer)
+      .pay.ToContract(
+        v0.scriptAddress,
+        { kind: "inline", value: modifiedDatum },
+        { [v0Unit]: 1n, lovelace: 2_000_000n },
+      )
+      .attach.SpendingValidator(v0.spendValidator)
+      .addSignerKey(ownerKeyHash)
+      .complete(COMPLETE_OPTS);
+
+    const signedModify = await modifyTx.sign.withWallet().complete();
+    const modifyHash = await signedModify.submit();
+    expect(modifyHash).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Verify Modify: State UTxO now has non-empty root
+    const v0UtxosAfterModify = await lucid.utxosAt(v0.scriptAddress);
+    const modifiedStateUtxo = v0UtxosAfterModify.find(
+      (u) => u.assets[v0Unit] === 1n,
+    );
+    expect(modifiedStateUtxo).toBeDefined();
+    // Verify the datum contains the expected non-empty root
+    expect(modifiedStateUtxo!.datum).toBe(modifiedDatum);
+
+    // --- MIGRATE v0 -> v1 with non-empty root ---
     const endRedeemer = encodeEndRedeemer();
     const burnRedeemer = encodeBurningRedeemer();
-    const migrateRedeemer = encodeMigratingRedeemer(v0.policyId, assetName);
+    const migrateV0V1Redeemer = encodeMigratingRedeemer(v0.policyId, assetName);
 
-    // The output datum for v1 carries over the same root
-    const migrateDatum = encodeStateDatum(ownerKeyHash, EMPTY_ROOT);
+    // The migration datum carries over the non-empty root
+    const migrateDatumV1 = encodeStateDatum(ownerKeyHash, MODIFIED_ROOT);
 
-    const migrateTx = await lucid
+    const migrateV0V1Tx = await lucid
       .newTx()
-      // Spend v0 state UTxO (End redeemer on spending validator)
-      .collectFrom([v0StateUtxo!], endRedeemer)
-      // Burn v0 token
+      .collectFrom([modifiedStateUtxo!], endRedeemer)
       .mintAssets({ [v0Unit]: -1n }, burnRedeemer)
-      // Mint v1 token (Migrating redeemer)
-      .mintAssets({ [v1Unit]: 1n }, migrateRedeemer)
-      // Send new token to v1 script address
+      .mintAssets({ [v1Unit]: 1n }, migrateV0V1Redeemer)
       .pay.ToContract(
         v1.scriptAddress,
-        { kind: "inline", value: migrateDatum },
+        { kind: "inline", value: migrateDatumV1 },
         { [v1Unit]: 1n, lovelace: 2_000_000n },
       )
       .attach.MintingPolicy(v0.mintPolicy)
@@ -198,47 +275,165 @@ describe("MPF Cage Migration E2E", () => {
       .addSignerKey(ownerKeyHash)
       .complete(COMPLETE_OPTS);
 
-    const signedMigrate = await migrateTx.sign.withWallet().complete();
-    const migrateHash = await signedMigrate.submit();
-    expect(migrateHash).toBeTruthy();
+    const signedMigrateV0V1 = await migrateV0V1Tx.sign.withWallet().complete();
+    const migrateV0V1Hash = await signedMigrateV0V1.submit();
+    expect(migrateV0V1Hash).toBeTruthy();
 
     await new Promise((r) => setTimeout(r, 5000));
 
-    // Verify migration: token exists at v1 address
+    // Verify migration: token exists at v1 with the non-empty root preserved
     const v1Utxos = await lucid.utxosAt(v1.scriptAddress);
     const v1StateUtxo = v1Utxos.find(
       (u) => u.assets[v1Unit] === 1n,
     );
     expect(v1StateUtxo).toBeDefined();
+    expect(v1StateUtxo!.datum).toBe(migrateDatumV1);
 
     // Verify: no token at v0 address
-    const v0UtxosAfter = await lucid.utxosAt(v0.scriptAddress);
-    const v0Remaining = v0UtxosAfter.find(
+    const v0UtxosAfterMigrate = await lucid.utxosAt(v0.scriptAddress);
+    const v0Remaining = v0UtxosAfterMigrate.find(
       (u) => u.assets[v0Unit] === 1n,
     );
     expect(v0Remaining).toBeUndefined();
 
-    // --- END on v1 ---
-    const endV1Tx = await lucid
+    // --- DELETE on v1 ---
+    // Create a Delete Request to remove the key we inserted on v0.
+    // After deletion the MPF root should return to EMPTY_ROOT.
+    const deleteRequestDatum = encodeDeleteRequestDatum(
+      assetName,
+      ownerKeyHash,
+      INSERT_KEY,
+      INSERT_VALUE,
+    );
+
+    const createDeleteTx = await lucid
       .newTx()
-      .collectFrom([v1StateUtxo!], endRedeemer)
-      .mintAssets({ [v1Unit]: -1n }, burnRedeemer)
-      .attach.MintingPolicy(v1.mintPolicy)
+      .pay.ToContract(
+        v1.scriptAddress,
+        { kind: "inline", value: deleteRequestDatum },
+        { lovelace: 2_000_000n },
+      )
+      .complete(COMPLETE_OPTS);
+
+    const signedDeleteReq = await createDeleteTx.sign.withWallet().complete();
+    const deleteReqHash = await signedDeleteReq.submit();
+    expect(deleteReqHash).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Find the Delete Request UTxO and refresh the State UTxO
+    const v1UtxosForDelete = await lucid.utxosAt(v1.scriptAddress);
+    const deleteRequestUtxo = v1UtxosForDelete.find(
+      (u) => u.assets[v1Unit] !== 1n && u.datum === deleteRequestDatum,
+    );
+    expect(deleteRequestUtxo).toBeDefined();
+
+    const v1StateForModify = v1UtxosForDelete.find(
+      (u) => u.assets[v1Unit] === 1n,
+    );
+    expect(v1StateForModify).toBeDefined();
+
+    // --- MODIFY on v1 (Delete) ---
+    // Fold the Delete request into the MPF, returning root to empty.
+    const deleteModifyRedeemer = encodeModifyRedeemer([[]]);
+    const deleteContributeRedeemer = encodeContributeRedeemer(v1StateForModify!);
+    const deletedDatum = encodeStateDatum(ownerKeyHash, EMPTY_ROOT);
+
+    const deleteModifyTx = await lucid
+      .newTx()
+      .collectFrom([v1StateForModify!], deleteModifyRedeemer)
+      .collectFrom([deleteRequestUtxo!], deleteContributeRedeemer)
+      .pay.ToContract(
+        v1.scriptAddress,
+        { kind: "inline", value: deletedDatum },
+        { [v1Unit]: 1n, lovelace: 2_000_000n },
+      )
       .attach.SpendingValidator(v1.spendValidator)
       .addSignerKey(ownerKeyHash)
       .complete(COMPLETE_OPTS);
 
-    const signedEndV1 = await endV1Tx.sign.withWallet().complete();
-    const endV1Hash = await signedEndV1.submit();
-    expect(endV1Hash).toBeTruthy();
+    const signedDeleteModify = await deleteModifyTx.sign.withWallet().complete();
+    const deleteModifyHash = await signedDeleteModify.submit();
+    expect(deleteModifyHash).toBeTruthy();
 
     await new Promise((r) => setTimeout(r, 5000));
 
-    // Verify cleanup
+    // Verify: root is back to empty after deletion
+    const v1UtxosAfterDelete = await lucid.utxosAt(v1.scriptAddress);
+    const v1DeletedState = v1UtxosAfterDelete.find(
+      (u) => u.assets[v1Unit] === 1n,
+    );
+    expect(v1DeletedState).toBeDefined();
+    expect(v1DeletedState!.datum).toBe(deletedDatum);
+
+    // --- MIGRATE v1 -> v2 with empty root ---
+    const v2 = loadValidator(2);
+    const v2Unit = v2.policyId + assetName;
+
+    expect(v2.policyId).not.toBe(v0.policyId);
+    expect(v2.policyId).not.toBe(v1.policyId);
+
+    const migrateV1V2Redeemer = encodeMigratingRedeemer(v1.policyId, assetName);
+    const migrateDatumV2 = encodeStateDatum(ownerKeyHash, EMPTY_ROOT);
+
+    const migrateV1V2Tx = await lucid
+      .newTx()
+      .collectFrom([v1DeletedState!], endRedeemer)
+      .mintAssets({ [v1Unit]: -1n }, burnRedeemer)
+      .mintAssets({ [v2Unit]: 1n }, migrateV1V2Redeemer)
+      .pay.ToContract(
+        v2.scriptAddress,
+        { kind: "inline", value: migrateDatumV2 },
+        { [v2Unit]: 1n, lovelace: 2_000_000n },
+      )
+      .attach.MintingPolicy(v1.mintPolicy)
+      .attach.MintingPolicy(v2.mintPolicy)
+      .attach.SpendingValidator(v1.spendValidator)
+      .addSignerKey(ownerKeyHash)
+      .complete(COMPLETE_OPTS);
+
+    const signedMigrateV1V2 = await migrateV1V2Tx.sign.withWallet().complete();
+    const migrateV1V2Hash = await signedMigrateV1V2.submit();
+    expect(migrateV1V2Hash).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Verify: token at v2 with empty root (back to zero)
+    const v2Utxos = await lucid.utxosAt(v2.scriptAddress);
+    const v2StateUtxo = v2Utxos.find(
+      (u) => u.assets[v2Unit] === 1n,
+    );
+    expect(v2StateUtxo).toBeDefined();
+    expect(v2StateUtxo!.datum).toBe(migrateDatumV2);
+
+    // Verify: no token at v1 address
     const v1UtxosFinal = await lucid.utxosAt(v1.scriptAddress);
     const v1Remaining = v1UtxosFinal.find(
       (u) => u.assets[v1Unit] === 1n,
     );
     expect(v1Remaining).toBeUndefined();
+
+    // --- END on v2 ---
+    const endV2Tx = await lucid
+      .newTx()
+      .collectFrom([v2StateUtxo!], endRedeemer)
+      .mintAssets({ [v2Unit]: -1n }, burnRedeemer)
+      .attach.MintingPolicy(v2.mintPolicy)
+      .attach.SpendingValidator(v2.spendValidator)
+      .addSignerKey(ownerKeyHash)
+      .complete(COMPLETE_OPTS);
+
+    const signedEndV2 = await endV2Tx.sign.withWallet().complete();
+    const endV2Hash = await signedEndV2.submit();
+    expect(endV2Hash).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Verify cleanup: no token at v2
+    const v2UtxosFinal = await lucid.utxosAt(v2.scriptAddress);
+    const v2Remaining = v2UtxosFinal.find(
+      (u) => u.assets[v2Unit] === 1n,
+    );
+    expect(v2Remaining).toBeUndefined();
   });
 });

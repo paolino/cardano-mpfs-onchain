@@ -36,8 +36,55 @@ export function encodeBurningRedeemer(): string {
   return Data.to(new Constr(2, []));
 }
 
-// UpdateRedeemer = End | Contribute(OutputReference) | Modify(List<Proof>) | Retract
+// UpdateRedeemer = End(0) | Contribute(OutputReference)(1) | Modify(List<Proof>)(2) | Retract(3)
+
 // End is index 0
 export function encodeEndRedeemer(): string {
   return Data.to(new Constr(0, []));
+}
+
+// Contribute is index 1, takes an OutputReference pointing to the State UTxO
+export function encodeContributeRedeemer(stateUtxo: UTxO): string {
+  const outputRef = new Constr(0, [
+    stateUtxo.txHash,
+    BigInt(stateUtxo.outputIndex),
+  ]);
+  return Data.to(new Constr(1, [outputRef]));
+}
+
+// Modify is index 2, takes List<Proof> where Proof = List<ProofStep>
+// For inserting into an empty MPF, proof is [] (empty list)
+// So one insert: proofs = [[]] (one empty proof)
+export function encodeModifyRedeemer(proofs: unknown[][]): string {
+  return Data.to(new Constr(2, [proofs]));
+}
+
+// CageDatum = RequestDatum(Request)(0) | StateDatum(State)(1)
+// Request { requestToken: TokenId, requestOwner: VerificationKeyHash,
+//           requestKey: ByteArray, requestValue: Operation }
+// TokenId { assetName: AssetName } = Constr(0, [assetName])
+// Operation = Insert(ByteArray)(0) | Delete(ByteArray)(1) | Update(ByteArray, ByteArray)(2)
+export function encodeRequestDatum(
+  assetName: string,
+  ownerHash: string,
+  key: string,
+  value: string,
+): string {
+  const tokenId = new Constr(0, [assetName]);
+  const operation = new Constr(0, [value]); // Insert
+  const request = new Constr(0, [tokenId, ownerHash, key, operation]);
+  return Data.to(new Constr(0, [request]));
+}
+
+// Delete(ByteArray) is Operation index 1
+export function encodeDeleteRequestDatum(
+  assetName: string,
+  ownerHash: string,
+  key: string,
+  value: string,
+): string {
+  const tokenId = new Constr(0, [assetName]);
+  const operation = new Constr(1, [value]); // Delete
+  const request = new Constr(0, [tokenId, ownerHash, key, operation]);
+  return Data.to(new Constr(0, [request]));
 }
