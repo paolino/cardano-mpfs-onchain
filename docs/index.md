@@ -10,6 +10,7 @@ Modifications are verified on-chain via cryptographic proofs.
 
 ## Documentation
 
+- [Development](development.md) — building, dev shell, justfile recipes
 - [Architecture Overview](architecture/overview.md) — system diagram, transaction lifecycle, protocol flow
 - [Validators](architecture/validators.md) — minting policy and spending validator logic
 - [Types & Encodings](architecture/types.md) — datum, redeemer, and operation structures

@@ -41,6 +41,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Development: development.md
   - Architecture:
       - Overview: architecture/overview.md
       - Validators: architecture/validators.md
