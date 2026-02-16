@@ -6,8 +6,7 @@
     "test": "vitest run --reporter=verbose"
   },
   "dependencies": {
-    "@lucid-evolution/lucid": "^0.4.34",
-    "@lucid-evolution/provider": "^0.1.44"
+    "@lucid-evolution/lucid": "^0.4.29"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

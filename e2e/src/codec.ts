@@ -1,6 +1,4 @@
-import { Data, type UTxO } from "@lucid-evolution/lucid";
-
-const { Constr } = Data;
+import { Constr, Data, type UTxO } from "@lucid-evolution/lucid";
 
 // CageDatum = RequestDatum(Request) | StateDatum(State)
 // StateDatum is constructor index 1, State has fields { owner, root }

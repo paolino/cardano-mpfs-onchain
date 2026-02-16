@@ -17,7 +17,8 @@ interface Blueprint {
 }
 
 export function loadValidator(version: number) {
-  const raw = readFileSync("/app/plutus.json", "utf-8");
+  const path = process.env.PLUTUS_JSON ?? "/app/plutus.json";
+  const raw = readFileSync(path, "utf-8");
   const blueprint: Blueprint = JSON.parse(raw);
 
   const mintEntry = blueprint.validators.find(
@@ -31,7 +32,6 @@ export function loadValidator(version: number) {
     throw new Error("Validator not found in plutus.json");
   }
 
-  // Apply version parameter (Int) to both validators
   const mintScript = applyParamsToScript(mintEntry.compiledCode, [
     BigInt(version),
   ]);

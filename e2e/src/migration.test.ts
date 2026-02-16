@@ -1,9 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { createHash } from "node:crypto";
 import {
-  Data,
   type LucidEvolution,
-  type UTxO,
   getAddressDetails,
   fromHex,
   toHex,
@@ -18,7 +16,8 @@ import {
   encodeEndRedeemer,
 } from "./codec.js";
 
-const { Constr } = Data;
+// Use Ogmios for script evaluation instead of local UPLC
+const COMPLETE_OPTS = { localUPLCEval: false };
 
 // Compute the asset name the same way the validator does:
 // SHA2-256(txHash ++ outputIndex as 2 big-endian bytes)
@@ -34,10 +33,10 @@ function computeAssetName(txHash: string, outputIndex: number): string {
   return toHex(new Uint8Array(hash));
 }
 
-// Empty MPF root hash (SHA2-256 of the empty trie)
-// This is root(empty) from aiken/merkle_patricia_forestry
+// Empty MPF root hash — root(empty) from aiken/merkle_patricia_forestry.
+// This is the null_hash constant: 32 bytes of zeros.
 const EMPTY_ROOT =
-  "2942e916f07e3fff2d3299f5bbf6e36e5ccd37a655e6c3058caee83d1bde8125";
+  "0000000000000000000000000000000000000000000000000000000000000000";
 
 describe("MPF Cage Migration E2E", () => {
   let lucid: LucidEvolution;
@@ -73,12 +72,12 @@ describe("MPF Cage Migration E2E", () => {
       .mintAssets({ [unit]: 1n }, mintRedeemer)
       .pay.ToContract(
         v0.scriptAddress,
-        { inline: datum },
+        { kind: "inline", value: datum },
         { [unit]: 1n, lovelace: 2_000_000n },
       )
       .attach.MintingPolicy(v0.mintPolicy)
       .addSignerKey(ownerKeyHash)
-      .complete();
+      .complete(COMPLETE_OPTS);
 
     const signedMint = await mintTx.sign.withWallet().complete();
     const mintHash = await signedMint.submit();
@@ -105,7 +104,7 @@ describe("MPF Cage Migration E2E", () => {
       .attach.MintingPolicy(v0.mintPolicy)
       .attach.SpendingValidator(v0.spendValidator)
       .addSignerKey(ownerKeyHash)
-      .complete();
+      .complete(COMPLETE_OPTS);
 
     const signedEnd = await endTx.sign.withWallet().complete();
     const endHash = await signedEnd.submit();
@@ -146,12 +145,12 @@ describe("MPF Cage Migration E2E", () => {
       .mintAssets({ [v0Unit]: 1n }, mintRedeemer)
       .pay.ToContract(
         v0.scriptAddress,
-        { inline: datum },
+        { kind: "inline", value: datum },
         { [v0Unit]: 1n, lovelace: 2_000_000n },
       )
       .attach.MintingPolicy(v0.mintPolicy)
       .addSignerKey(ownerKeyHash)
-      .complete();
+      .complete(COMPLETE_OPTS);
 
     const signedMint = await mintTx.sign.withWallet().complete();
     const mintHash = await signedMint.submit();
@@ -190,14 +189,14 @@ describe("MPF Cage Migration E2E", () => {
       // Send new token to v1 script address
       .pay.ToContract(
         v1.scriptAddress,
-        { inline: migrateDatum },
+        { kind: "inline", value: migrateDatum },
         { [v1Unit]: 1n, lovelace: 2_000_000n },
       )
       .attach.MintingPolicy(v0.mintPolicy)
       .attach.MintingPolicy(v1.mintPolicy)
       .attach.SpendingValidator(v0.spendValidator)
       .addSignerKey(ownerKeyHash)
-      .complete();
+      .complete(COMPLETE_OPTS);
 
     const signedMigrate = await migrateTx.sign.withWallet().complete();
     const migrateHash = await signedMigrate.submit();
@@ -227,7 +226,7 @@ describe("MPF Cage Migration E2E", () => {
       .attach.MintingPolicy(v1.mintPolicy)
       .attach.SpendingValidator(v1.spendValidator)
       .addSignerKey(ownerKeyHash)
-      .complete();
+      .complete(COMPLETE_OPTS);
 
     const signedEndV1 = await endV1Tx.sign.withWallet().complete();
     const endV1Hash = await signedEndV1.submit();

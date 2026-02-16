@@ -1,6 +1,6 @@
 services:
   yaci-cli:
-    image: bloxbean/yaci-cli:0.10.6-beta
+    image: bloxbean/yaci-cli:0.11.0-beta1
     ports:
       - "8080:8080"   # yaci-store (Blockfrost-compatible API)
       - "10000:10000" # admin API
@@ -8,7 +8,8 @@ services:
     env_file: yaci.env
     volumes:
       - ./node.properties:/app/config/node.properties
-    entrypoint: ["/bin/bash", "-c", "yaci-cli.sh create-node -o --start"]
+    entrypoint: ["/app/yaci-cli"]
+    command: ["create-node", "-o", "--start"]
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/epochs/latest"]
       interval: 5s
@@ -24,7 +25,15 @@ services:
     environment:
       YACI_HOST: yaci-cli
     volumes:
-      - ./:/app/e2e
+      - ./:/mnt/e2e:ro
       - ../plutus.json:/app/plutus.json:ro
     working_dir: /app/e2e
-    entrypoint: ["/bin/bash", "-c", "npm ci && npm test"]
+    entrypoint:
+      - sh
+      - -c
+      - |
+        cp -r /mnt/e2e/. /app/e2e/
+        npm install
+        ln -sf ../../../libsodium-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs \
+          node_modules/libsodium-wrappers-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs
+        npm test
