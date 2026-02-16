@@ -47,3 +47,4 @@ nav:
       - Validators: architecture/validators.md
       - Types & Encodings: architecture/types.md
       - Proof System: architecture/proofs.md
+      - Security Properties: architecture/properties.md

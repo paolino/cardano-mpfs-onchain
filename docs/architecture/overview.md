@@ -91,13 +91,23 @@ sequenceDiagram
 
 ## Security Properties
 
-1. **Ownership** — only the token owner can modify or destroy a token.
+The validators enforce 17 invariants across 12 categories, each
+verified by the inline test suite (44 tests / 242 checks):
+
+1. **Ownership** — only the oracle (token owner) can modify or destroy a token.
 2. **Integrity** — every MPF modification carries a cryptographic proof
-   verified on-chain.
+   verified on-chain; the output root must match the proof computation.
 3. **Uniqueness** — token IDs are derived from spent UTxOs, guaranteed
    unique by the ledger.
-4. **Retractability** — request owners can always reclaim their locked ADA.
-5. **Verifiability** — all changes are traceable via blockchain history.
+4. **Confinement** — the token must remain at the script address after
+   every operation.
+5. **Retractability** — request owners can always reclaim their locked ADA.
+6. **Type safety** — each redeemer/datum combination is enforced; mismatches
+   are rejected.
+7. **Verifiability** — all changes are traceable via blockchain history.
+
+See [Security Properties](properties.md) for the complete list with
+test cross-references.
 
 ## Aiken Dependencies
 

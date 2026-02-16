@@ -15,3 +15,4 @@ Modifications are verified on-chain via cryptographic proofs.
 - [Validators](architecture/validators.md) — minting policy and spending validator logic
 - [Types & Encodings](architecture/types.md) — datum, redeemer, and operation structures
 - [Proof System](architecture/proofs.md) — MPF proof format, verification, and performance
+- [Security Properties](architecture/properties.md) — 17 invariants verified by 44 tests

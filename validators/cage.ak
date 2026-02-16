@@ -96,8 +96,10 @@ use aiken/collection/list.{find, foldl, has, head}
 use aiken/merkle_patricia_forestry.{MerklePatriciaForestry, Proof, empty, root}
 use aiken/merkle_patricia_forestry as mpf
 use aiken/option.{is_some}
+use aiken/fuzz
 use cardano/address.{from_script}
-use cardano/assets.{PolicyId, from_lovelace, zero}
+use cardano/address
+use cardano/assets.{PolicyId, from_asset, from_lovelace, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -903,6 +905,566 @@ test canMint() {
       outputs: [minted],
       mint: minted_value,
       inputs: [Input { output_reference: reference, output: consumed_utxo }],
+    },
+  )
+}
+
+// ============================================================================
+// Minting failure tests
+// ============================================================================
+
+// Helper: valid mint transaction (reusable base for failure tests)
+fn mint_tx() -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    outputs: [minted],
+    mint: minted_value,
+    inputs: [Input { output_reference: reference, output: consumed_utxo }],
+  }
+}
+
+test mint_missing_input() fail {
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), inputs: [] },
+  )
+}
+
+test mint_quantity_two() fail {
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction {
+      ..mint_tx(),
+      mint: from_asset("policy_id", assetName(reference), 2),
+    },
+  )
+}
+
+test mint_to_wallet() fail {
+  let wallet_output =
+    Output { ..minted, address: address.from_verification_key("someone") }
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), outputs: [wallet_output] },
+  )
+}
+
+test mint_to_wrong_script() fail {
+  let wrong_output =
+    Output { ..minted, address: address.from_script("other_script") }
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), outputs: [wrong_output] },
+  )
+}
+
+test mint_nonempty_root() fail {
+  let bad_output =
+    Output {
+      ..minted,
+      datum: InlineDatum(
+        StateDatum(State { owner: "owner", root: "nonempty_root" }),
+      ),
+    }
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), outputs: [bad_output] },
+  )
+}
+
+test mint_request_datum() fail {
+  let bad_output =
+    Output {
+      ..minted,
+      datum: InlineDatum(
+        RequestDatum(
+          Request {
+            requestToken: token,
+            requestKey: "k",
+            requestValue: Insert("v"),
+            requestOwner: "owner",
+          },
+        ),
+      ),
+    }
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), outputs: [bad_output] },
+  )
+}
+
+test mint_no_datum() fail {
+  let bad_output = Output { ..minted, datum: NoDatum }
+  mpfCage.mint(
+    Minting(minting),
+    "policy_id",
+    Transaction { ..mint_tx(), outputs: [bad_output] },
+  )
+}
+
+// ============================================================================
+// Retract tests
+// ============================================================================
+
+test retract_happy() {
+  mpfCage.spend(
+    Some(aRequest),
+    Retract,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+    },
+  )
+}
+
+test retract_wrong_signer() fail {
+  mpfCage.spend(
+    Some(aRequest),
+    Retract,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["someone_else"],
+    },
+  )
+}
+
+// ============================================================================
+// Contribute tests
+// ============================================================================
+
+test contribute_wrong_token() fail {
+  let wrong_request =
+    RequestDatum(
+      Request {
+        requestToken: TokenId { assetName: "different_asset" },
+        requestKey: "42",
+        requestValue: Insert("42"),
+        requestOwner: "owner",
+      },
+    )
+  mpfCage.spend(
+    Some(wrong_request),
+    Contribute(testStateRef),
+    testRequestRef,
+    Transaction { ..transaction.placeholder, inputs: [update, request] },
+  )
+}
+
+test contribute_missing_ref() fail {
+  let missing_ref =
+    OutputReference { transaction_id: "nonexistent", output_index: 0 }
+  mpfCage.spend(
+    Some(aRequest),
+    Contribute(missing_ref),
+    testRequestRef,
+    Transaction { ..transaction.placeholder, inputs: [update, request] },
+  )
+}
+
+// ============================================================================
+// Modify tests
+// ============================================================================
+
+test modify_missing_signature() fail {
+  mpfCage.spend(
+    stateDatum,
+    Modify([[]]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [output],
+      extra_signatories: [],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_wrong_address() fail {
+  let bad_output =
+    Output {
+      ..output,
+      address: address.from_script("different_script"),
+    }
+  mpfCage.spend(
+    stateDatum,
+    Modify([[]]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [bad_output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_owner_transfer() {
+  // output already has owner: "new-owner", this should succeed
+  mpfCage.spend(
+    stateDatum,
+    Modify([[]]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_no_requests() {
+  // No request inputs -> root stays the same (empty MPF root)
+  let unchanged_output =
+    Output {
+      address: testScriptAddress,
+      value: testValue,
+      datum: InlineDatum(
+        StateDatum(State { owner: "owner", root: root(empty) }),
+      ),
+      reference_script: None,
+    }
+  mpfCage.spend(
+    stateDatum,
+    Modify([]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [unchanged_output],
+      extra_signatories: ["owner"],
+      inputs: [update],
+    },
+  )
+}
+
+test modify_skip_other_token() {
+  // Request for a different token — should be skipped, no proof consumed
+  let other_request_datum =
+    RequestDatum(
+      Request {
+        requestToken: TokenId { assetName: "other_token" },
+        requestKey: "42",
+        requestValue: Insert("42"),
+        requestOwner: "someone",
+      },
+    )
+  let other_request =
+    Input {
+      output_reference: OutputReference {
+        transaction_id: "3334567890abcdef",
+        output_index: 1,
+      },
+      output: Output {
+        address: testScriptAddress,
+        value: from_lovelace(0),
+        datum: InlineDatum(other_request_datum),
+        reference_script: None,
+      },
+    }
+  let unchanged_output =
+    Output {
+      address: testScriptAddress,
+      value: testValue,
+      datum: InlineDatum(
+        StateDatum(State { owner: "owner", root: root(empty) }),
+      ),
+      reference_script: None,
+    }
+  mpfCage.spend(
+    stateDatum,
+    Modify([]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [unchanged_output],
+      extra_signatories: ["owner"],
+      inputs: [update, other_request],
+    },
+  )
+}
+
+test modify_too_few_proofs() fail {
+  // One matching request but zero proofs
+  mpfCage.spend(
+    stateDatum,
+    Modify([]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_extra_proofs() {
+  // One matching request, two proofs — extra proof is ignored
+  mpfCage.spend(
+    stateDatum,
+    Modify([[], []]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_wrong_root() fail {
+  let bad_root_output =
+    Output {
+      address: testScriptAddress,
+      value: testValue,
+      datum: InlineDatum(
+        StateDatum(State { owner: "new-owner", root: "wrong_root_hash" }),
+      ),
+      reference_script: None,
+    }
+  mpfCage.spend(
+    stateDatum,
+    Modify([[]]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [bad_root_output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+// ============================================================================
+// End tests
+// ============================================================================
+
+// End needs: owner signs + mint field contains the token being burned
+const burn_value = valueFromToken("policy_id", testToken)
+
+test end_happy() {
+  mpfCage.spend(
+    stateDatum,
+    End,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+      inputs: [update],
+      mint: burn_value,
+    },
+  )
+}
+
+test end_missing_signature() fail {
+  mpfCage.spend(
+    stateDatum,
+    End,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: [],
+      inputs: [update],
+      mint: burn_value,
+    },
+  )
+}
+
+test end_wrong_token_in_mint() fail {
+  let wrong_burn = valueFromToken("policy_id", TokenId { assetName: "wrong" })
+  mpfCage.spend(
+    stateDatum,
+    End,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+      inputs: [update],
+      mint: wrong_burn,
+    },
+  )
+}
+
+// ============================================================================
+// Datum-redeemer mismatch tests
+// ============================================================================
+
+test retract_on_state_datum() fail {
+  mpfCage.spend(
+    stateDatum,
+    Retract,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+    },
+  )
+}
+
+test contribute_on_state_datum() fail {
+  mpfCage.spend(
+    stateDatum,
+    Contribute(testStateRef),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [update],
+    },
+  )
+}
+
+test modify_on_request_datum() fail {
+  mpfCage.spend(
+    Some(aRequest),
+    Modify([]),
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+      inputs: [request],
+    },
+  )
+}
+
+test end_on_request_datum() fail {
+  mpfCage.spend(
+    Some(aRequest),
+    End,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: ["owner"],
+      inputs: [request],
+      mint: burn_value,
+    },
+  )
+}
+
+// ============================================================================
+// Edge cases
+// ============================================================================
+
+test spend_no_datum() fail {
+  mpfCage.spend(
+    None,
+    Retract,
+    testRequestRef,
+    transaction.placeholder,
+  )
+}
+
+// ============================================================================
+// Property tests
+// ============================================================================
+
+fn owner_fuzzer() -> Fuzzer<ByteArray> {
+  fuzz.bytearray_fixed(28)
+}
+
+test prop_retract_requires_owner(
+  signer via owner_fuzzer(),
+) fail once {
+  let req =
+    RequestDatum(
+      Request {
+        requestToken: testToken,
+        requestKey: "k",
+        requestValue: Insert("v"),
+        requestOwner: "the_real_owner_key_aaaaaaaaaa",
+      },
+    )
+  mpfCage.spend(
+    Some(req),
+    Retract,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      extra_signatories: [signer],
+    },
+  )
+}
+
+test prop_modify_requires_owner(
+  signer via owner_fuzzer(),
+) fail once {
+  let s = State { owner: "the_real_owner_key_aaaaaaaaaa", root: root(empty) }
+  let unchanged_output =
+    Output {
+      address: testScriptAddress,
+      value: testValue,
+      datum: InlineDatum(
+        StateDatum(State { owner: "the_real_owner_key_aaaaaaaaaa", root: root(empty) }),
+      ),
+      reference_script: None,
+    }
+  let state_input =
+    Input {
+      output_reference: testStateRef,
+      output: Output {
+        address: testScriptAddress,
+        value: testValue,
+        datum: InlineDatum(Some(StateDatum(s))),
+        reference_script: None,
+      },
+    }
+  mpfCage.spend(
+    Some(StateDatum(s)),
+    Modify([]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [unchanged_output],
+      extra_signatories: [signer],
+      inputs: [state_input],
+    },
+  )
+}
+
+test prop_mint_roundtrip(
+  params via fuzz.tuple(
+    fuzz.bytearray_fixed(32),
+    fuzz.int_between(0, 255),
+  ),
+) {
+  let (tx_id, idx) = params
+  let ref = OutputReference { transaction_id: tx_id, output_index: idx }
+  let tok = TokenId { assetName: assetName(ref) }
+  let mint_redeemer = Mint { asset: ref }
+  let val = valueFromToken("policy_id", tok)
+  let addr = address.from_script("policy_id")
+  let out =
+    Output {
+      address: addr,
+      value: val,
+      datum: InlineDatum(
+        StateDatum(State { owner: "owner", root: root(empty) }),
+      ),
+      reference_script: None,
+    }
+  let utxo =
+    Output {
+      address: paying_address,
+      value: zero,
+      datum: NoDatum,
+      reference_script: None,
+    }
+  mpfCage.mint(
+    Minting(mint_redeemer),
+    "policy_id",
+    Transaction {
+      ..transaction.placeholder,
+      outputs: [out],
+      mint: val,
+      inputs: [Input { output_reference: ref, output: utxo }],
     },
   )
 }

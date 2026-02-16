@@ -44,7 +44,9 @@ use aiken/collection/dict.{get, keys}
 use aiken/collection/list.{delete, find}
 use aiken/crypto.{Hash, Sha2_256, sha2_256}
 use aiken/primitive/bytearray.{concat, from_int_big_endian}
+use aiken/fuzz
 use cardano/assets.{AssetName, PolicyId, Value, from_asset, policies, tokens}
+use cardano/assets
 use cardano/transaction.{Input, Output, OutputReference}
 
 /// A unique identifier for a token, consisting of just the asset name.
@@ -237,4 +239,99 @@ pub fn extractTokenFromInputs(what: OutputReference, inputs: List<Input>) {
       }
     _ -> None
   }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// --- assetName tests ---
+
+const ref_a =
+  OutputReference { transaction_id: "tx_aaaaaa", output_index: 0 }
+
+const ref_b =
+  OutputReference { transaction_id: "tx_bbbbbb", output_index: 0 }
+
+const ref_c =
+  OutputReference { transaction_id: "tx_aaaaaa", output_index: 1 }
+
+test assetName_deterministic() {
+  assetName(ref_a) == assetName(ref_a)
+}
+
+test assetName_different_txid() {
+  assetName(ref_a) != assetName(ref_b)
+}
+
+test assetName_different_index() {
+  assetName(ref_a) != assetName(ref_c)
+}
+
+test prop_assetName_deterministic(
+  params via fuzz.tuple(
+    fuzz.bytearray_fixed(32),
+    fuzz.int_between(0, 65535),
+  ),
+) {
+  let (tx_id, idx) = params
+  let ref = OutputReference { transaction_id: tx_id, output_index: idx }
+  assetName(ref) == assetName(ref)
+}
+
+// --- tokenFromValue tests ---
+
+const test_policy = "test_policy_id"
+
+const test_asset = "test_asset_name"
+
+test tokenFromValue_single_nft() {
+  let v = from_asset(test_policy, test_asset, 1)
+  tokenFromValue(v) == Some(TokenId { assetName: test_asset })
+}
+
+test tokenFromValue_ada_only() {
+  let v = from_asset("", "", 2_000_000)
+  tokenFromValue(v) == None
+}
+
+test tokenFromValue_multi_policy() {
+  let v =
+    from_asset("policy_a", "asset", 1)
+      |> assets.merge(from_asset("policy_b", "asset", 1))
+  tokenFromValue(v) == None
+}
+
+test tokenFromValue_multi_asset() {
+  let v =
+    from_asset(test_policy, "asset_a", 1)
+      |> assets.merge(from_asset(test_policy, "asset_b", 1))
+  tokenFromValue(v) == None
+}
+
+test tokenFromValue_roundtrip() {
+  let pid = "my_policy"
+  let tid = TokenId { assetName: "my_asset" }
+  tokenFromValue(valueFromToken(pid, tid)) == Some(tid)
+}
+
+// --- quantity tests ---
+
+const q_policy = "q_policy"
+
+const q_token = TokenId { assetName: "q_asset" }
+
+test quantity_present() {
+  let v = from_asset(q_policy, "q_asset", 1)
+  quantity(q_policy, v, q_token) == Some(1)
+}
+
+test quantity_wrong_policy() {
+  let v = from_asset("other_policy", "q_asset", 1)
+  quantity(q_policy, v, q_token) == None
+}
+
+test quantity_wrong_asset() {
+  let v = from_asset(q_policy, "other_asset", 1)
+  quantity(q_policy, v, q_token) == None
 }
