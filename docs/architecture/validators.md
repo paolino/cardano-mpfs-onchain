@@ -22,7 +22,7 @@ Creates a new MPF token instance.
 3. The token is sent to the script address.
 4. The output datum is a `StateDatum` with an empty MPF root
    (`root(empty)`).
-5. The owner is set to the transaction signer.
+5. The owner field is unrestricted (any `VerificationKeyHash`).
 
 ```mermaid
 graph LR
@@ -65,17 +65,15 @@ The token owner applies pending requests to the MPF trie.
 
 ```mermaid
 graph TD
-    STATE_IN["State UTxO<br/>(current root)"]
-    REQ1["Request UTxO 1"]
-    REQ2["Request UTxO 2"]
-    PROOFS["Proofs [p1, p2]"]
+    STATE_IN["State UTxO<br/>(current root)<br/>redeemer: Modify [p1, p2]"]
+    REQ1["Request UTxO 1<br/>redeemer: Contribute(stateRef)"]
+    REQ2["Request UTxO 2<br/>redeemer: Contribute(stateRef)"]
     FOLD["Fold proofs over root"]
     STATE_OUT["State UTxO<br/>(new root)"]
 
-    STATE_IN --> FOLD
-    REQ1 --> FOLD
-    REQ2 --> FOLD
-    PROOFS --> FOLD
+    STATE_IN -->|Modify| FOLD
+    REQ1 -->|Contribute| FOLD
+    REQ2 -->|Contribute| FOLD
     FOLD --> STATE_OUT
 ```
 
@@ -84,9 +82,9 @@ appropriate MPF function based on the operation type:
 
 | Operation | MPF Function | Proof Shows |
 |---|---|---|
-| Insert(value) | `insert(key, value, proof)` | Key is absent |
-| Delete(value) | `delete(key, value, proof)` | Key is present with value |
-| Update(old, new) | `update(key, proof, old, new)` | Key is present with old value |
+| Insert(value) | `mpf.insert(root, key, value, proof)` | Key is absent |
+| Delete(value) | `mpf.delete(root, key, value, proof)` | Key is present with value |
+| Update(old, new) | `mpf.update(root, key, proof, old, new)` | Key is present with old value |
 
 ### Contribute (ConStr1)
 
@@ -126,8 +124,8 @@ Destroys the MPF token instance.
 
 | Function | Signature | Purpose |
 |---|---|---|
-| `quantity` | `TokenId -> Value -> Int` | Get token quantity in a value |
+| `quantity` | `(PolicyId, Value, TokenId) -> Option<Int>` | Get token quantity in a value |
 | `assetName` | `OutputReference -> AssetName` | Compute unique asset name via SHA2-256 |
-| `valueFromToken` | `TokenId -> Value` | Construct value with exactly 1 token |
-| `tokenFromValue` | `Value -> TokenId` | Extract single non-ADA token from value |
-| `extractTokenFromInputs` | `List<Input> -> TokenId -> (Input, List<Input>)` | Find and extract the input carrying a token |
+| `valueFromToken` | `(PolicyId, TokenId) -> Value` | Construct value with exactly 1 token |
+| `tokenFromValue` | `Value -> Option<TokenId>` | Extract single non-ADA token from value |
+| `extractTokenFromInputs` | `(OutputReference, List<Input>) -> Option<(Input, TokenId)>` | Find input by ref and extract its token |

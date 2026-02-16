@@ -12,86 +12,91 @@ that builds transactions and manages the trie lives in the
 directory of the upstream repository.
 
 ```mermaid
-architecture-beta
+graph TD
+    subgraph Blockchain
+        V["Cage Validators"]
+        S1["Token X<br/>State UTxO"]
+        R1["Request UTxOs"]
+    end
 
-    service chain(internet)[Cardano Blockchain]
-    group alice(cloud)[alice Box]
-        service aliceMPFS(server)[alice MPFS Service] in alice
-        service requester1(server)[alice client] in alice
-        requester1:R -- L:aliceMPFS
-    aliceMPFS:R -- L:chain
+    O["Oracle<br/>(token owner)"]
+    A["Requester A"]
+    B["Requester B"]
+    Obs["Observer"]
 
-    service bobMPFS(server)[public MPFS Service]
-    service requester2(server)[bob client]
-    requester2:R -- L:bobMPFS
-
-    service requester3(server)[willy client]
-    requester3:L -- R:bobMPFS
-
-    bobMPFS:T -- B:chain
-    group oracle(cloud)[oracle Box]
-        service oracleMPFS(server)[oracle MPFS Service] in oracle
-        service oracleClient(server)[oracle client] in oracle
-        oracleClient:L -- R:oracleMPFS
-    oracleMPFS:B -- T:chain
+    O -->|"Boot / Modify / End"| V
+    A -->|"Submit request"| R1
+    B -->|"Submit request"| R1
+    R1 -->|"consumed by Modify"| S1
+    Obs -.->|"read chain history"| Blockchain
 ```
 
-Each MPFS service instance talks to the blockchain through the
-on-chain validators. Multiple independent services can coexist,
-each managing its own set of MPF tokens.
+The **oracle** (token owner) controls the MPF token: it boots
+the token, applies pending requests via `Modify`, and can
+destroy it with `End`. **Requesters** submit modification
+requests as UTxOs at the script address. **Observers** read
+the MPF state from the blockchain history — no on-chain
+interaction is needed.
 
 ## Transaction Lifecycle
 
-Five transaction types interact with the validators:
+The token and requests have separate lifecycles that intersect
+when the oracle processes a `Modify` transaction.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Boot: Mint token
-    Boot --> Active: Token created
-    Active --> Active: Update (Modify)
-    Active --> Active: Request (Contribute)
-    Active --> Active: Retract
-    Active --> [*]: End (Burn)
+    state "Token Lifecycle" as TL {
+        [*] --> Active: Boot (Mint)
+        Active --> Active: Modify
+        Active --> [*]: End (Burn)
+    }
+
+    state "Request Lifecycle" as RL {
+        [*] --> Pending: Submit (pay to script)
+        Pending --> Consumed: Contribute + Modify
+        Pending --> [*]: Retract
+    }
+
+    Pending --> Active: consumed by
 ```
 
 | Transaction | Action | Validator |
 |---|---|---|
 | Boot | Mint a new MPF token with empty root | Minting policy |
-| Request | Lock ADA at script with a modification request | — (pay to script) |
-| Update | Apply pending requests, update MPF root | Spending validator (Modify + Contribute) |
-| Retract | Cancel a pending request, reclaim ADA | Spending validator (Retract) |
-| End | Burn the MPF token, destroy the instance | Minting policy + Spending validator (End) |
+| Submit | Lock ADA at script with a modification request | — (pay to script, no validator) |
+| Modify | Oracle applies pending requests, updates MPF root | Spending validator (Modify on state + Contribute on each request) |
+| Retract | Request owner cancels a pending request, reclaims ADA | Spending validator (Retract) |
+| End | Burn the MPF token, destroy the instance | Minting policy (Burning) + Spending validator (End) |
 
 ## Protocol Flow
 
 ```mermaid
 sequenceDiagram
-    participant A as Alice
-    participant C as Bob
-    participant B as Blockchain
     participant O as Oracle
-    participant Pub as Anyone
+    participant B as Blockchain
+    participant A as Alice (requester)
+    participant C as Bob (requester)
 
-    O->>B: Boot MPF Token X
+    O->>B: Boot Token X (Mint)
+    Note over B: Token X created with empty root
 
-    A->>B: Request to Insert Fact A
-    C->>B: Request to Insert Fact B
+    A->>B: Submit Request: Insert("keyA", "valA")
+    C->>B: Submit Request: Insert("keyB", "valB")
+    Note over B: Two Request UTxOs at script address
 
-    O->>B: Update MPF Token X
+    O->>B: Modify Token X (consumes both requests)
+    Note over B: Root updated: empty → root(keyA, keyB)
 
-    Pub->>B: Observe MPF Token X
-    B-->>Pub: Return Facts A, B
+    A->>B: Submit Request: Delete("keyB", "valB")
+    O->>B: Modify Token X
+    Note over B: Root updated: root(keyA, keyB) → root(keyA)
 
-    A->>B: Delete Fact B Request
-    O->>B: Update MPF Token
-    Pub->>B: Observe MPF Token X
-    B-->>Pub: Return Fact A
+    C->>B: Submit Request: Delete("keyA", "valA")
+    C->>B: Retract own request
+    Note over B: Request UTxO reclaimed, root unchanged
 
-    C->>B: Delete Fact A Request
-    C->>B: Retract request to Delete Fact A
-    O->>B: Update MPF Token X
-    Pub->>B: Observe MPF Token X
-    B-->>Pub: Return Fact A
+    O->>B: End Token X (Burn)
+    Note over B: Token destroyed
 ```
 
 ## Security Properties
@@ -107,9 +112,10 @@ verified by the inline test suite (44 tests / 242 checks):
 4. **Confinement** — the token must remain at the script address after
    every operation.
 5. **Retractability** — request owners can always reclaim their locked ADA.
-6. **Type safety** — each redeemer/datum combination is enforced; mismatches
+6. **Request binding** — a request's target token is validated on-chain
+   before it can be consumed.
+7. **Type safety** — each redeemer/datum combination is enforced; mismatches
    are rejected.
-7. **Verifiability** — all changes are traceable via blockchain history.
 
 See [Security Properties](properties.md) for the complete list with
 test cross-references.

@@ -7,8 +7,15 @@ and compiled to Plutus V3 data encodings.
 ## Token Identity
 
 ```aiken
-type TokenId = (PolicyId, AssetName)
+type TokenId {
+    assetName: AssetName
+}
 ```
+
+`TokenId` wraps only the `AssetName`. The `PolicyId` is always
+the cage script's own hash (since the minting policy and spending
+validator share the same script) and is passed separately where
+needed.
 
 The `AssetName` is derived from a consumed UTxO reference via
 SHA2-256, guaranteeing global uniqueness.
@@ -55,7 +62,7 @@ type Request {
 
 | Field | Encoding | Description |
 |---|---|---|
-| `requestToken` | `(PolicyId, AssetName)` | Target MPF token |
+| `requestToken` | `TokenId` | Target MPF token (asset name only; policy ID is implicit) |
 | `requestOwner` | 28 bytes | Who can retract this request |
 | `requestKey` | variable | Key in the MPF trie |
 | `requestValue` | `Operation` | What to do with this key |
@@ -135,10 +142,10 @@ Constr(1,           -- CageDatum.StateDatum
 ```
 Constr(0,           -- CageDatum.RequestDatum
   [ Constr(0,       -- Request
-      [ Constr(0, [Bytes(policy_id), Bytes(asset_name)])  -- TokenId
+      [ Constr(0, [Bytes(asset_name)])  -- TokenId
       , Bytes(owner_pkh)
       , Bytes(key)
-      , Constr(0, [Bytes(new_value)])                     -- Insert
+      , Constr(0, [Bytes(new_value)])   -- Insert
       ])
   ])
 ```

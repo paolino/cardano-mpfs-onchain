@@ -65,58 +65,58 @@ type Neighbor {
 | `Fork` | A node where the path diverges. `neighbor` describes the other branch |
 | `Leaf` | A terminal node. `key` is the remaining suffix, `value` is the stored value |
 
-## Proof Verification
+## Public API
 
-The MPF library provides two core verification functions:
-
-```aiken
-fn including(key, value, proof) -> ByteArray
-```
-
-Computes what the root hash **would be** if `(key, value)` is
-present. Used to verify inclusion and to compute the new root
-after insertion.
+The MPF library exposes three mutation functions used by the
+spending validator:
 
 ```aiken
-fn excluding(key, proof) -> ByteArray
+fn insert(self, key, value, proof) -> MerklePatriciaForestry
+fn delete(self, key, value, proof) -> MerklePatriciaForestry
+fn update(self, key, proof, old_value, new_value) -> MerklePatriciaForestry
 ```
 
-Computes what the root hash **would be** if `key` is absent.
-Used to verify exclusion and to compute the new root after
-deletion.
+Each takes the current `MerklePatriciaForestry` (root), verifies
+the proof against it, and returns a new root. If the proof is
+invalid the function fails, aborting the transaction.
+
+Internally the library uses two helper functions (`including` and
+`excluding`) that compute what the root hash **would be** if a
+key-value pair is present or absent. These are not exported but
+underpin the public API.
 
 ## On-Chain Operations
 
-The spending validator uses proofs for each operation:
+The spending validator calls the MPF functions for each request
+operation:
 
 ### Insert
 
-Proves the key is **absent**, then computes the new root with
-the key present.
+Verifies the key is **absent** (via `excluding`), then computes
+the new root with the key present (via `including`).
 
-```
-old_root == excluding(key, proof)
-new_root  = including(key, new_value, proof)
+```aiken
+new_root = mpf.insert(old_root, key, new_value, proof)
 ```
 
 ### Delete
 
-Proves the key is **present** with the expected value, then
-computes the new root with the key absent.
+Verifies the key is **present** with the expected value (via
+`including`), then computes the new root with the key absent
+(via `excluding`).
 
-```
-old_root == including(key, old_value, proof)
-new_root  = excluding(key, proof)
+```aiken
+new_root = mpf.delete(old_root, key, old_value, proof)
 ```
 
 ### Update
 
-Proves the key is **present** with the old value, then computes
-the new root with the new value.
+Verifies the key is **present** with the old value, then
+computes the new root with the new value. Equivalent to a
+delete + insert but with one fewer membership check.
 
-```
-old_root == including(key, old_value, proof)
-new_root  = including(key, new_value, proof)
+```aiken
+new_root = mpf.update(old_root, key, proof, old_value, new_value)
 ```
 
 ## Proof Folding
@@ -143,36 +143,10 @@ previous step. The final root must match the output datum.
 
 ## Hashing
 
-MPF uses **Blake2b-256** (Aiken-compatible):
+MPF uses **Blake2b-256** internally for all digests (key hashing,
+value hashing, node hashing). See the
+[library source](https://github.com/aiken-lang/merkle-patricia-forestry)
+for implementation details.
 
-**Leaf hash:**
-
-```
-digest(hashHead || hashTail || valueDigest)
-```
-
-- Even-length suffix: `hashHead = 0xff`, `hashTail = all digits`
-- Odd-length suffix: `hashHead = 0x00 || first digit`, `hashTail = remaining`
-
-**Branch hash:**
-
-```
-digest(nibbleBytes(prefix) || merkleRoot)
-```
-
-**Merkle root:** pairwise reduction of a sparse 16-element array
-of child hashes.
-
-## Performance
-
-Average proof sizes and execution costs by trie size:
-
-| Elements | Proof Size | Memory | CPU |
-|---|---|---|---|
-| 10² | ~250 bytes | ~70K | ~28M |
-| 10³ | ~350 bytes | ~100K | ~42M |
-| 10⁴ | ~460 bytes | ~130K | ~56M |
-| 10⁶ | ~670 bytes | ~190K | ~84M |
-
-Proof size grows logarithmically with the number of elements,
-making MPF practical even for very large datasets.
+Proof size grows logarithmically with the number of elements in
+the trie, making MPF practical even for very large datasets.
