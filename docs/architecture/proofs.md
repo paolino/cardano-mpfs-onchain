@@ -1,8 +1,9 @@
 # Proof System
 
-The on-chain validators verify Merkle Patricia Forestry (MPF)
-proofs to ensure that every trie modification is cryptographically
-valid.
+The on-chain validators verify
+[Merkle Patricia Forestry](https://github.com/aiken-lang/merkle-patricia-forestry)
+(MPF) proofs to ensure that every trie modification is
+cryptographically valid.
 
 ## MPF Structure
 

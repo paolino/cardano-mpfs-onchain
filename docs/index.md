@@ -4,6 +4,12 @@ Aiken validators for
 [Merkle Patricia Forestry](https://github.com/aiken-lang/merkle-patricia-forestry)
 on Cardano (Plutus V3).
 
+This repository contains the on-chain component of the
+[MPFS project](https://github.com/cardano-foundation/mpfs)
+by the Cardano Foundation. The validators were originally developed in
+[`on_chain/`](https://github.com/cardano-foundation/mpfs/tree/main/on_chain)
+of that repository.
+
 The on-chain component defines a **cage** pattern: an NFT locked at
 a script address carries the current MPF root hash as its datum.
 Modifications are verified on-chain via cryptographic proofs.

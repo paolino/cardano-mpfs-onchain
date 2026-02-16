@@ -6,8 +6,13 @@ with the test(s) that verify it.
 
 The properties are derived from the
 [upstream MPFS specification](https://cardano-foundation.github.io/mpfs/)
-and verified by the inline test suite. Run `aiken check` (or `just test`)
-to check all 44 tests / 242 checks.
+([architecture](https://cardano-foundation.github.io/mpfs/architecture/),
+[on-chain code docs](https://cardano-foundation.github.io/mpfs/code/on-chain/))
+and verified by the inline test suite in
+[`cage.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/cage.ak)
+and
+[`lib.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/lib.ak).
+Run `aiken check` (or `just test`) to check all 44 tests / 242 checks.
 
 ---
 

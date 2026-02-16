@@ -1,7 +1,8 @@
 # Types & Encodings
 
-All on-chain data structures are defined in `types.ak` and
-compiled to Plutus V3 data encodings.
+All on-chain data structures are defined in
+[`types.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/types.ak)
+and compiled to Plutus V3 data encodings.
 
 ## Token Identity
 

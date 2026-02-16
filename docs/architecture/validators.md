@@ -1,7 +1,10 @@
 # Validators
 
-The on-chain logic lives in a single script (`cage.ak`) that
-implements both a **minting policy** and a **spending validator**.
+The on-chain logic lives in a single script
+([`cage.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/cage.ak))
+that implements both a **minting policy** and a **spending validator**.
+Helper functions are in
+[`lib.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/lib.ak).
 
 ## Minting Policy (`mpfCage.mint`)
 

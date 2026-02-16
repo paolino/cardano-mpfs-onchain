@@ -2,9 +2,14 @@
 
 ## System Context
 
-The on-chain validators are one half of the MPFS system. They
-enforce the rules for creating, updating, and destroying MPF
-token instances on the Cardano blockchain.
+The on-chain validators are one half of the
+[MPFS system](https://github.com/cardano-foundation/mpfs)
+([documentation](https://cardano-foundation.github.io/mpfs/)).
+They enforce the rules for creating, updating, and destroying MPF
+token instances on the Cardano blockchain. The off-chain service
+that builds transactions and manages the trie lives in the
+[`off_chain/`](https://github.com/cardano-foundation/mpfs/tree/main/off_chain)
+directory of the upstream repository.
 
 ```mermaid
 architecture-beta
@@ -111,17 +116,8 @@ test cross-references.
 
 ## Aiken Dependencies
 
-```toml
-name = "hal/mpf"
-version = "0.0.0"
-compiler = "v1.1.16"
-plutus = "v3"
-
-[[dependencies]]
-name = "aiken-lang/stdlib"
-version = "v2.2.0"
-
-[[dependencies]]
-name = "aiken-lang/merkle-patricia-forestry"
-version = "v2.0.0"
-```
+| Dependency | Version | Purpose |
+|---|---|---|
+| [aiken-lang/stdlib](https://github.com/aiken-lang/stdlib) | v2.2.0 | Standard library (assets, transactions, addresses) |
+| [aiken-lang/merkle-patricia-forestry](https://github.com/aiken-lang/merkle-patricia-forestry) | v2.0.0 | MPF trie operations and proof verification |
+| [aiken-lang/fuzz](https://github.com/aiken-lang/fuzz) | v2.1.1 | Property-based testing (used in test suite only) |

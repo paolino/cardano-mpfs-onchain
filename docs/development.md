@@ -45,7 +45,18 @@ just test
 
 ## How the Nix build works
 
-The flake pre-fetches the three Aiken dependencies (`stdlib`, `fuzz`,
-`merkle-patricia-forestry`) using `fetchFromGitHub` and populates
-`build/packages/` before running `aiken build`. This avoids network
-access inside the Nix sandbox.
+The flake pre-fetches the three Aiken dependencies
+([stdlib](https://github.com/aiken-lang/stdlib),
+[fuzz](https://github.com/aiken-lang/fuzz),
+[merkle-patricia-forestry](https://github.com/aiken-lang/merkle-patricia-forestry))
+using `fetchFromGitHub` and populates `build/packages/` before
+running `aiken build`. This avoids network access inside the Nix
+sandbox.
+
+## Upstream
+
+The validators originate from the
+[cardano-foundation/mpfs](https://github.com/cardano-foundation/mpfs)
+repository (`on_chain/` directory). See the upstream
+[documentation](https://cardano-foundation.github.io/mpfs/) for the
+full MPFS system including the off-chain TypeScript service.
