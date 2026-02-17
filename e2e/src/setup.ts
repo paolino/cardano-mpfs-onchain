@@ -74,15 +74,33 @@ async function ogmiosEvaluateTx(txCbor: string): Promise<any> {
   // Transform Ogmios format to what Lucid expects:
   // Ogmios: [{ validator: { index, purpose }, budget: { memory, cpu } }]
   // Lucid:  [{ redeemer_index, redeemer_tag, ex_units: { mem, steps } }]
+  //
+  // Ogmios evaluates a transaction with zeroed ExUnits; after Lucid plugs
+  // the real units back in and recalculates the fee, the on-chain script
+  // context is slightly larger.  A 20% margin prevents budget exhaustion.
+  const MARGIN = 1.2;
   return json.result.map((item: any) => ({
     redeemer_index: item.validator.index,
     redeemer_tag: item.validator.purpose,
     ex_units: {
-      mem: item.budget.memory,
-      steps: item.budget.cpu,
+      mem: Math.ceil(item.budget.memory * MARGIN),
+      steps: Math.ceil(item.budget.cpu * MARGIN),
     },
   }));
 }
+
+/**
+ * Offset (ms) between wall-clock POSIX time and on-chain POSIX time.
+ *
+ * Yaci DevKit instant-forwards through a synthetic "pre-Conway" era at
+ * startup.  This makes the node's systemStart earlier than the actual
+ * wall-clock genesis, so on-chain POSIX times (in the validity range)
+ * are systematically ahead of Date.now() by this offset.
+ *
+ * Use this when encoding POSIX timestamps in datums (e.g. submitted_at)
+ * so they align with the on-chain validity range.
+ */
+export let onChainTimeOffset = 0n;
 
 export async function initLucid(): Promise<LucidEvolution> {
   // Use Blockfrost (Yaci Store) as base provider
@@ -100,14 +118,26 @@ export async function initLucid(): Promise<LucidEvolution> {
 
   // Lucid's Custom network initializes SLOT_CONFIG_NETWORK with slotLength: 0,
   // which causes division-by-zero when converting POSIX time to slots.
-  // Query Yaci DevKit's genesis endpoint for the actual parameters.
-  const genesisRes = await fetch(`${STORE_URL}/genesis`);
-  const genesis = await genesisRes.json();
+  // Derive the genesis time from the latest block's time and slot number
+  // (Yaci DevKit uses 1-second slots).
+  const blockRes = await fetch(`${STORE_URL}/blocks/latest`);
+  const block = await blockRes.json();
+  const effectiveGenesis = (block.time - block.slot) * 1000; // ms
   SLOT_CONFIG_NETWORK["Custom"] = {
-    zeroTime: genesis.system_start * 1000, // seconds → milliseconds
+    zeroTime: effectiveGenesis,
     zeroSlot: 0,
-    slotLength: genesis.slot_length * 1000, // seconds → milliseconds
+    slotLength: 1_000, // 1 second per slot
   };
+
+  // Compute the offset between the node's on-chain POSIX times and wall clock.
+  // The node uses systemStart (from the Shelley genesis) for slot→POSIX, but
+  // Yaci's instant-forwarded pre-Conway era means systemStart > effectiveGenesis.
+  const genesisRes = await fetch(
+    `${ADMIN_URL}/local-cluster/api/admin/devnet/genesis/shelley`,
+  );
+  const genesis = await genesisRes.json();
+  const systemStartMs = BigInt(Date.parse(genesis.systemStart));
+  onChainTimeOffset = systemStartMs - BigInt(effectiveGenesis);
 
   return Lucid(provider, "Custom");
 }

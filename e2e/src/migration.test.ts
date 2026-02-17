@@ -28,8 +28,8 @@ describe("MPF Cage Migration E2E", () => {
     ownerKeyHash = details.paymentCredential!.hash;
   });
 
-  const PROCESS_TIME = 60_000n;
-  const RETRACT_TIME = 60_000n;
+  const PROCESS_TIME = 600_000n; // 10 minutes
+  const RETRACT_TIME = 600_000n;
 
   it("mint and end on single version", async () => {
     await cage(
