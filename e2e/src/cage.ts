@@ -19,6 +19,7 @@ import {
   encodeContributeRedeemer,
   encodeRejectRedeemer,
 } from "./codec.js";
+import { onChainTimeOffset } from "./setup.js";
 
 const COMPLETE_OPTS = { localUPLCEval: false };
 
@@ -201,7 +202,7 @@ class Cage implements PromiseLike<void> {
   ): Promise<void> {
     const fee = opts?.fee ?? 0n;
     const lovelace = 2_000_000n;
-    const submittedAt = BigInt(Date.now());
+    const submittedAt = BigInt(Date.now()) + onChainTimeOffset;
     const encode = isDelete
       ? encodeDeleteRequestDatum
       : encodeRequestDatum;
@@ -256,20 +257,12 @@ class Cage implements PromiseLike<void> {
       this.maxFee,
     );
 
-    // Phase 1 validity: tx must be entirely before submittedAt + processTime
     const now = BigInt(Date.now());
-    const deadline = this.pendingRequests.reduce(
-      (min, r) => {
-        const d = r.submittedAt + this.validator.processTime;
-        return d < min ? d : min;
-      },
-      now + this.validator.processTime,
-    );
 
     let txBuilder = this.lucid
       .newTx()
       .validFrom(Number(now))
-      .validTo(Number(deadline) - 1)
+      .validTo(Number(now + 60_000n))
       .collectFrom([this.stateUtxo!], modifyRedeemer)
       .collectFrom(
         this.pendingRequests.map((r) => r.utxo),
@@ -357,12 +350,12 @@ class Cage implements PromiseLike<void> {
       this.maxFee,
     );
 
-    // Phase 3 validity: tx must be entirely after submittedAt + processTime + retractTime
     const now = BigInt(Date.now());
 
     let txBuilder = this.lucid
       .newTx()
       .validFrom(Number(now))
+      .validTo(Number(now + 60_000n))
       .collectFrom([this.stateUtxo!], rejectRedeemer)
       .collectFrom(
         this.pendingRequests.map((r) => r.utxo),
@@ -423,10 +416,31 @@ class Cage implements PromiseLike<void> {
     txBuilder: Awaited<ReturnType<ReturnType<LucidEvolution["newTx"]>["complete"]>>,
   ): Promise<string> {
     const signed = await txBuilder.sign.withWallet().complete();
-    const hash = await signed.submit();
-    expect(hash).toBeTruthy();
-    await new Promise((r) => setTimeout(r, 5000));
-    return hash;
+    const txCbor = signed.toCBOR();
+    try {
+      const hash = await signed.submit();
+      expect(hash).toBeTruthy();
+      await new Promise((r) => setTimeout(r, 5000));
+      return hash;
+    } catch (err: unknown) {
+      // Try submitting directly to Ogmios for better error details
+      const ogmiosBody = {
+        jsonrpc: "2.0",
+        method: "submitTransaction",
+        params: { transaction: { cbor: txCbor } },
+        id: null,
+      };
+      const ogmiosRes = await fetch("http://localhost:1337", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ogmiosBody),
+      });
+      const ogmiosJson = await ogmiosRes.json();
+      console.error("=== SUBMIT ERROR ===");
+      console.error("Lucid error:", String(err));
+      console.error("Ogmios submit:", JSON.stringify(ogmiosJson, null, 2));
+      throw err;
+    }
   }
 
   private async findStateUtxo(): Promise<UTxO> {
