@@ -13,6 +13,8 @@ of that repository.
 The on-chain component defines a **cage** pattern: an NFT locked at
 a script address carries the current MPF root hash as its datum.
 Modifications are verified on-chain via cryptographic proofs.
+Time-gated phases prevent race conditions between the oracle and
+requesters, and a Reject mechanism enables DDoS protection.
 
 ## Documentation
 
@@ -21,4 +23,4 @@ Modifications are verified on-chain via cryptographic proofs.
 - [Validators](architecture/validators.md) — minting policy and spending validator logic
 - [Types & Encodings](architecture/types.md) — datum, redeemer, and operation structures
 - [Proof System](architecture/proofs.md) — MPF proof format, verification, and performance
-- [Security Properties](architecture/properties.md) — 17 invariants verified by 44 tests
+- [Security Properties](architecture/properties.md) — 16 categories verified by 67 tests

@@ -9,10 +9,10 @@ The properties are derived from the
 ([architecture](https://cardano-foundation.github.io/mpfs/architecture/),
 [on-chain code docs](https://cardano-foundation.github.io/mpfs/code/on-chain/))
 and verified by the inline test suite in
-[`cage.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/cage.ak)
+[`cage.ak`](https://github.com/cardano-foundation/cardano-mpfs-onchain/blob/main/validators/cage.ak)
 and
-[`lib.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/lib.ak).
-Run `aiken check` (or `just test`) to check all 44 tests / 242 checks.
+[`lib.ak`](https://github.com/cardano-foundation/cardano-mpfs-onchain/blob/main/validators/lib.ak).
+Run `aiken check` (or `just test`) to check all 67 tests.
 
 ---
 
@@ -43,7 +43,11 @@ depend on off-chain behaviour:
 | Every modification carries a valid Merkle proof | On-chain (proof verification) |
 | Output root matches proof computation | On-chain (fold + compare) |
 | Token stays at the script address | On-chain (address check) |
-| Requesters can always reclaim locked ADA | On-chain (Retract path) |
+| Requesters can reclaim locked ADA in Phase 2 | On-chain (Retract + phase check) |
+| Expired requests are cleaned up | On-chain (Reject + phase check) |
+| Oracle fees are enforced | On-chain (fee == max_fee check) |
+| Refunds are paid correctly | On-chain (verifyRefunds) |
+| Time phases are exclusive | On-chain (validity_range checks) |
 | The oracle honestly processes matching requests | Off-chain (oracle behaviour) |
 | Proofs are computed against the correct trie state | Off-chain (proof generation) |
 | All knowledge is reconstructable from history | Blockchain (ledger property) |
@@ -102,8 +106,8 @@ the transaction.
 **Invariant:** Only the holder of the correct verification key can
 perform privileged operations.
 
-- **Modify / End** (oracle operations): require the `State.owner`
-  signature.
+- **Modify / Reject / End** (oracle operations): require the
+  `State.owner` signature.
 - **Retract** (requester operation): requires the
   `Request.requestOwner` signature.
 - **Contribute**: permissionless — anyone can link a request to a
@@ -114,6 +118,7 @@ perform privileged operations.
 | Oracle signs Modify | `canCage` | Modify |
 | Missing oracle signature blocks Modify | `modify_missing_signature` | Modify |
 | Missing oracle signature blocks End | `end_missing_signature` | End |
+| Missing oracle signature blocks Reject | `reject_missing_signature` | Reject |
 | Requester signs Retract | `retract_happy` | Retract |
 | Wrong signer blocks Retract | `retract_wrong_signer` | Retract |
 | Random signer != requester fails Retract | `prop_retract_requires_owner` | Retract |
@@ -122,8 +127,8 @@ perform privileged operations.
 ## 4. Token Confinement
 
 **Invariant:** The caged token must remain at the same script
-address after a `Modify` operation. The output's payment credential
-must equal the input's payment credential.
+address after a `Modify` or `Reject` operation. The output's
+payment credential must equal the input's payment credential.
 
 This prevents the oracle from extracting the token to a wallet or
 redirecting it to a different script during an update.
@@ -237,6 +242,7 @@ token while keeping the caged one is rejected.
 |---|---|
 | Correct token burned | `end_happy` |
 | Different token in mint field | `end_wrong_token_in_mint` |
+| End with unrelated extra minting policy | `end_with_extra_mint_policy` |
 
 ## 12. Token Extraction
 
@@ -256,22 +262,102 @@ extraction fails and the validator rejects.
 | 1 policy, 2 asset names | `tokenFromValue_multi_asset` | `None` |
 | Roundtrip via `valueFromToken` | `tokenFromValue_roundtrip` | `Some(TokenId)` |
 
+## 13. Time-Gated Phases
+
+**Invariant:** Each request passes through three exclusive time
+phases. The validator enforces phase boundaries using
+`tx.validity_range` and the immutable `process_time` / `retract_time`
+parameters. No operation can execute outside its designated phase.
+
+```
+submitted_at          + process_time       + process_time + retract_time
+    |                        |                        |
+    |   Phase 1: Oracle      |   Phase 2: Requester   |   Phase 3: Oracle
+    |   Modify only          |   Retract only         |   Reject only
+```
+
+This eliminates the race condition where a requester retracts while
+the oracle is building a Modify transaction.
+
+| Property | Test | Expected |
+|---|---|---|
+| Retract blocked in Phase 1 | `retract_in_phase1` | fail |
+| Retract allowed in Phase 2 | `retract_happy` | pass |
+| Retract blocked in Phase 3 | `retract_in_phase3` | fail |
+| Contribute blocked in Phase 2 | `contribute_in_phase2` | fail |
+| Contribute allowed in Phase 3 (for Reject) | `contribute_in_phase3` | pass |
+| Modify blocked in Phase 2 | `modify_in_phase2` | fail |
+
+## 14. Reject (DDoS Protection)
+
+**Invariant:** The oracle can discard requests that are past their
+retract window (Phase 3) or have a dishonest `submitted_at`
+timestamp. The oracle keeps the fee and refunds the remaining
+lovelace. The MPF root must **not** change during a Reject.
+
+This prevents DDoS attacks where requesters spam requests and
+retract them before the oracle can process them.
+
+| Property | Test | Expected |
+|---|---|---|
+| Reject in Phase 3 (happy path) | `reject_happy` | pass |
+| Reject blocked in Phase 1 | `reject_in_phase1` | fail |
+| Reject blocked in Phase 2 | `reject_in_phase2` | fail |
+| Reject with future `submitted_at` (dishonest) | `reject_future_submitted_at` | pass |
+| Reject without owner signature | `reject_missing_signature` | fail |
+| Reject must not change root | `reject_root_changes` | fail |
+| Reject with insufficient refund | `reject_wrong_refund` | fail |
+
+## 15. Fee Enforcement
+
+**Invariant:** When the oracle processes requests via `Modify`,
+each request's `fee` must equal `state.max_fee`. The oracle
+receives the fee and the requester is refunded `lovelace - fee`.
+Refunds are verified on-chain: correct amount, correct address.
+
+| Property | Test | Expected |
+|---|---|---|
+| Modify with fee and correct refund | `modify_with_refund` | pass |
+| Modify with missing refund output | `modify_missing_refund` | fail |
+| Modify with insufficient refund | `modify_insufficient_refund` | fail |
+| Modify with wrong refund address | `modify_wrong_refund_address` | fail |
+| Modify with zero fee (no refund deduction) | `modify_zero_fee` | pass |
+| Request fee != state max_fee | `modify_fee_mismatch` | fail |
+
+## 16. Migration
+
+**Invariant:** A token can be migrated from an old validator to
+a new one by atomically burning the old token and minting a new
+one. The token identity (asset name) and MPF root are preserved.
+The old token must be burned (-1) in the same transaction.
+
+| Property | Test | Expected |
+|---|---|---|
+| Migration happy path (burn old, mint new) | `canMigrate` | pass |
+| Migration without burning old token | `migrate_no_burn` | fail |
+| Migration to wallet instead of script | `migrate_to_wallet` | fail |
+| Migration with wrong old policy ID | `migrate_wrong_old_policy` | fail |
+
 ---
 
 ## Summary
 
-| Category | Properties | Tests |
+| # | Category | Tests |
 |---|---|---|
-| Token uniqueness | 1 | 4 |
-| Minting integrity | 1 | 9 |
-| Ownership & authorization | 3 | 7 |
-| Token confinement | 1 | 2 |
-| Ownership transfer | 1 | 2 |
-| State integrity (MPF root) | 1 | 4 |
-| Proof consumption | 1 | 3 |
-| Request binding | 1 | 3 |
-| Datum-redeemer type safety | 4 | 4 |
-| Datum presence | 1 | 1 |
-| End / burn integrity | 1 | 2 |
-| Token extraction | 1 | 5 |
-| **Total** | **17** | **44** (242 checks) |
+| 1 | Token uniqueness | 4 |
+| 2 | Minting integrity | 9 |
+| 3 | Ownership & authorization | 8 |
+| 4 | Token confinement | 2 |
+| 5 | Ownership transfer | 2 |
+| 6 | State integrity (MPF root) | 4 |
+| 7 | Proof consumption | 3 |
+| 8 | Request binding | 3 |
+| 9 | Datum-redeemer type safety | 4 |
+| 10 | Datum presence | 1 |
+| 11 | End / burn integrity | 3 |
+| 12 | Token extraction | 5 |
+| 13 | Time-gated phases | 6 |
+| 14 | Reject (DDoS protection) | 7 |
+| 15 | Fee enforcement | 6 |
+| 16 | Migration | 4 |
+| | **Total** | **67** |

@@ -1,7 +1,7 @@
 # Types & Encodings
 
 All on-chain data structures are defined in
-[`types.ak`](https://github.com/cardano-foundation/mpfs/blob/main/on_chain/validators/types.ak)
+[`types.ak`](https://github.com/cardano-foundation/cardano-mpfs-onchain/blob/main/validators/types.ak)
 and compiled to Plutus V3 data encodings.
 
 ## Token Identity
@@ -38,7 +38,8 @@ Attached to the UTxO that holds the MPF token.
 ```aiken
 type State {
     owner: VerificationKeyHash
-    root: ByteArray  -- 32-byte MPF root hash
+    root: ByteArray    -- 32-byte MPF root hash
+    max_fee: Int       -- max lovelace fee per request
 }
 ```
 
@@ -46,6 +47,7 @@ type State {
 |---|---|---|
 | `owner` | 28 bytes | Ed25519 public key hash of the token owner |
 | `root` | 32 bytes | Current MPF root (Blake2b-256). Empty trie has a well-known null hash |
+| `max_fee` | integer | Maximum fee (in lovelace) the oracle charges per request. Requesters must agree to this fee |
 
 ### Request
 
@@ -57,6 +59,8 @@ type Request {
     requestOwner: VerificationKeyHash
     requestKey: ByteArray
     requestValue: Operation
+    fee: Int
+    submitted_at: Int
 }
 ```
 
@@ -66,6 +70,8 @@ type Request {
 | `requestOwner` | 28 bytes | Who can retract this request |
 | `requestKey` | variable | Key in the MPF trie |
 | `requestValue` | `Operation` | What to do with this key |
+| `fee` | integer | Fee (in lovelace) the requester agrees to pay. Must match `state.max_fee` at Modify time |
+| `submitted_at` | integer | POSIXTime (ms) when the request was submitted. Determines which time phase the request is in |
 
 ## Operations
 
@@ -92,8 +98,14 @@ type Mint {
     asset: OutputReference
 }
 
+type Migration {
+    oldPolicy: PolicyId
+    tokenId: TokenId
+}
+
 type MintRedeemer {
     Minting(Mint)
+    Migrating(Migration)
     Burning
 }
 ```
@@ -101,7 +113,8 @@ type MintRedeemer {
 | Constructor | Index | Fields | Description |
 |---|---|---|---|
 | `Minting` | 0 | `Mint { asset: OutputReference }` | Boot a new token. `asset` identifies which UTxO to consume for unique naming |
-| `Burning` | 1 | — | Burn the token (paired with `End` on the spending side) |
+| `Migrating` | 1 | `Migration { oldPolicy, tokenId }` | Migrate a token from an old validator. The old token must be burned atomically |
+| `Burning` | 2 | — | Burn the token (paired with `End` on the spending side) |
 
 ### Spending Redeemer
 
@@ -111,15 +124,17 @@ type UpdateRedeemer {
     Contribute(OutputReference)
     Modify(List<Proof>)
     Retract
+    Reject
 }
 ```
 
 | Constructor | Index | Fields | Description |
 |---|---|---|---|
 | `End` | 0 | — | Destroy the MPF instance |
-| `Contribute` | 1 | `OutputReference` | Spend a request during update; points to the state UTxO |
-| `Modify` | 2 | `List<Proof>` | Update the MPF root; one proof per request |
-| `Retract` | 3 | — | Cancel a request and reclaim ADA |
+| `Contribute` | 1 | `OutputReference` | Spend a request during update or reject; points to the state UTxO |
+| `Modify` | 2 | `List<Proof>` | Update the MPF root; one proof per request. Phase 1 only |
+| `Retract` | 3 | — | Cancel a request and reclaim ADA. Phase 2 only |
+| `Reject` | 4 | — | Discard expired/dishonest requests, refund ADA minus fee. Phase 3 or dishonest `submitted_at` |
 
 ## Plutus Data Encoding
 
@@ -133,6 +148,7 @@ Constr(1,           -- CageDatum.StateDatum
   [ Constr(0,       -- State
       [ Bytes(owner_pkh)
       , Bytes(root_hash)
+      , Int(max_fee)
       ])
   ])
 ```
@@ -146,6 +162,8 @@ Constr(0,           -- CageDatum.RequestDatum
       , Bytes(owner_pkh)
       , Bytes(key)
       , Constr(0, [Bytes(new_value)])   -- Insert
+      , Int(fee)
+      , Int(submitted_at)
       ])
   ])
 ```
