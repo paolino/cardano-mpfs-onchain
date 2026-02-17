@@ -4,6 +4,7 @@ import {
   type LucidEvolution,
   generateSeedPhrase,
 } from "@lucid-evolution/lucid";
+import { SLOT_CONFIG_NETWORK } from "@lucid-evolution/plutus";
 
 const YACI_HOST = process.env.YACI_HOST ?? "localhost";
 
@@ -96,6 +97,17 @@ export async function initLucid(): Promise<LucidEvolution> {
       return Reflect.get(target, prop, receiver);
     },
   });
+
+  // Lucid's Custom network initializes SLOT_CONFIG_NETWORK with slotLength: 0,
+  // which causes division-by-zero when converting POSIX time to slots.
+  // Query Yaci DevKit's genesis endpoint for the actual parameters.
+  const genesisRes = await fetch(`${STORE_URL}/genesis`);
+  const genesis = await genesisRes.json();
+  SLOT_CONFIG_NETWORK["Custom"] = {
+    zeroTime: genesis.system_start * 1000, // seconds → milliseconds
+    zeroSlot: 0,
+    slotLength: genesis.slot_length * 1000, // seconds → milliseconds
+  };
 
   return Lucid(provider, "Custom");
 }
