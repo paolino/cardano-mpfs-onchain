@@ -37,7 +37,7 @@ export function encodeBurningRedeemer(): string {
   return Data.to(new Constr(2, []));
 }
 
-// UpdateRedeemer = End(0) | Contribute(OutputReference)(1) | Modify(List<Proof>)(2) | Retract(3)
+// UpdateRedeemer = End(0) | Contribute(OutputReference)(1) | Modify(List<Proof>)(2) | Retract(3) | Reject(4)
 
 // End is index 0
 export function encodeEndRedeemer(): string {
@@ -56,7 +56,7 @@ export function encodeContributeRedeemer(stateUtxo: UTxO): string {
 // Modify is index 2, takes List<Proof> where Proof = List<ProofStep>
 // For inserting into an empty MPF, proof is [] (empty list)
 // So one insert: proofs = [[]] (one empty proof)
-export function encodeModifyRedeemer(proofs: unknown[][]): string {
+export function encodeModifyRedeemer(proofs: Data[][]): string {
   return Data.to(new Constr(2, [proofs]));
 }
 
@@ -71,10 +71,18 @@ export function encodeRequestDatum(
   key: string,
   value: string,
   fee: bigint = 0n,
+  submittedAt: bigint = 0n,
 ): string {
   const tokenId = new Constr(0, [assetName]);
   const operation = new Constr(0, [value]); // Insert
-  const request = new Constr(0, [tokenId, ownerHash, key, operation, fee]);
+  const request = new Constr(0, [
+    tokenId,
+    ownerHash,
+    key,
+    operation,
+    fee,
+    submittedAt,
+  ]);
   return Data.to(new Constr(0, [request]));
 }
 
@@ -85,9 +93,22 @@ export function encodeDeleteRequestDatum(
   key: string,
   value: string,
   fee: bigint = 0n,
+  submittedAt: bigint = 0n,
 ): string {
   const tokenId = new Constr(0, [assetName]);
   const operation = new Constr(1, [value]); // Delete
-  const request = new Constr(0, [tokenId, ownerHash, key, operation, fee]);
+  const request = new Constr(0, [
+    tokenId,
+    ownerHash,
+    key,
+    operation,
+    fee,
+    submittedAt,
+  ]);
   return Data.to(new Constr(0, [request]));
+}
+
+// Reject is index 4 (no fields)
+export function encodeRejectRedeemer(): string {
+  return Data.to(new Constr(4, []));
 }

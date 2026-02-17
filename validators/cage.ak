@@ -100,6 +100,7 @@
 use aiken/collection/list
 use aiken/collection/list.{find, foldl, has, head}
 use aiken/crypto.{VerificationKeyHash}
+use aiken/interval
 use aiken/merkle_patricia_forestry.{MerklePatriciaForestry, Proof, empty, root}
 use aiken/merkle_patricia_forestry as mpf
 use aiken/option.{is_some}
@@ -114,8 +115,8 @@ use cardano/transaction.{
 use lib.{TokenId, assetName, quantity, tokenFromValue, valueFromToken}
 use types.{
   Burning, CageDatum, Contribute, Delete, End, Insert, Migrating, Migration, Mint,
-  MintRedeemer, Minting, Modify, Request, RequestDatum, Retract, State, StateDatum,
-  Update, UpdateRedeemer,
+  MintRedeemer, Minting, Modify, Reject, Request, RequestDatum, Retract, State,
+  StateDatum, Update, UpdateRedeemer,
 }
 
 /// The main validator for caged MPF tokens.
@@ -131,7 +132,7 @@ use types.{
 /// spending validator (`spend`) runs because the UTxO is at this script's
 /// address. The `else(_)` handler rejects any other purpose (e.g.,
 /// withdrawal, certify).
-validator mpfCage(_version: Int) {
+validator mpfCage(_version: Int, process_time: Int, retract_time: Int) {
   /// Minting policy: validates creation and destruction of caged tokens.
   ///
   /// - `Minting`: Creates a new caged token with an empty MPF root.
@@ -214,38 +215,21 @@ validator mpfCage(_version: Int) {
     when redeemer is {
       Retract -> {
         // --- RETRACT PATH ---
-        // Only valid for Request UTxOs. Allows the request creator to
-        // reclaim their UTxO (and its ADA) if the cage owner hasn't
-        // processed the request yet.
-        //
-        // Fail if datum is not a RequestDatum (e.g., if someone tries
-        // to Retract a State UTxO, this expect will fail)
+        // Only valid for Request UTxOs during Phase 2 (retract window).
         expect RequestDatum(request) = datum
-        // Extract the request owner's verification key hash
-        let Request { requestOwner, .. } = request
-        let Transaction { extra_signatories, .. } = tx
-        // Fail if the request owner hasn't signed the transaction.
-        // This ensures only the original request creator can retract.
-        // Note: no other checks are needed -- the request UTxO is simply
-        // consumed, and its ADA goes wherever the transaction specifies.
+        let Request { requestOwner, submitted_at, .. } = request
+        let Transaction { extra_signatories, validity_range, .. } = tx
         expect has(extra_signatories, requestOwner)
+        // Phase 2: retract window is open
+        expect
+          in_phase2(validity_range, submitted_at, process_time, retract_time)
         True
       }
       Contribute(tokenRef) -> {
         // --- CONTRIBUTE PATH ---
-        // Valid for Request UTxOs. This is a permissionless operation
-        // that validates a request targets the correct caged token.
-        //
-        // The `tokenRef` is the OutputReference of the State UTxO that
-        // holds the caged NFT. The validator looks up this input and
-        // extracts the token to compare against the request's target.
-        //
-        // Fail if datum is not a RequestDatum
+        // Valid for Request UTxOs in Phase 1 or when rejectable.
         expect RequestDatum(request) = datum
-        // Validate that the request's target token matches the actual
-        // token at tokenRef. This prevents requests from being applied
-        // to the wrong cage.
-        validRequest(request, tokenRef, tx)
+        validRequest(request, tokenRef, tx, process_time, retract_time)
       }
       _ -> {
         // --- MODIFY / END PATH ---
@@ -263,7 +247,24 @@ validator mpfCage(_version: Int) {
         // TokenId (for identifying which token is being operated on).
         let (input, tokenId) = extractToken(self, tx)
         when redeemer is {
-          Modify(proofs) -> validRootUpdate(state, input, tokenId, tx, proofs)
+          Modify(proofs) ->
+            validRootUpdate(
+              state,
+              input,
+              tokenId,
+              tx,
+              proofs,
+              process_time,
+            )
+          Reject ->
+            validReject(
+              state,
+              input,
+              tokenId,
+              tx,
+              process_time,
+              retract_time,
+            )
           End -> {
             expect address.Script(policyId) =
               input.output.address.payment_credential
@@ -398,10 +399,26 @@ fn validateOwnership(state: State, tx: Transaction) {
 /// - requestToken matches token at tokenRef -> True
 /// - requestToken differs from token at tokenRef -> fail
 /// - tokenRef not in inputs -> fail (extractToken fails)
-fn validRequest(request: Request, tokenRef: OutputReference, tx: Transaction) {
-  let Request { requestToken, .. } = request
+fn validRequest(
+  request: Request,
+  tokenRef: OutputReference,
+  tx: Transaction,
+  process_time: Int,
+  retract_time: Int,
+) {
+  let Request { requestToken, submitted_at, .. } = request
   let (_input, tokenId) = extractToken(tokenRef, tx)
   expect requestToken == tokenId
+  let Transaction { validity_range, .. } = tx
+  // Phase 1 or rejectable (NOT Phase 2 — requester-exclusive)
+  expect
+    in_phase1(validity_range, submitted_at, process_time)
+      || is_rejectable(
+          validity_range,
+          submitted_at,
+          process_time,
+          retract_time,
+        )
   True
 }
 
@@ -430,6 +447,48 @@ fn uncons(list: List<a>, cont: fn(a, List<a>) -> b) -> b {
     [] -> fail
     [x, ..xs] -> cont(x, xs)
   }
+}
+
+/// Check if the validity range is entirely within Phase 1 (oracle processing).
+/// Phase 1: from submitted_at to submitted_at + process_time (exclusive).
+fn in_phase1(validity_range, submitted_at, process_time) -> Bool {
+  interval.is_entirely_before(validity_range, submitted_at + process_time)
+}
+
+/// Check if the validity range is entirely within Phase 2 (requester retract).
+/// Phase 2: from submitted_at + process_time to
+///          submitted_at + process_time + retract_time (exclusive).
+fn in_phase2(
+  validity_range,
+  submitted_at,
+  process_time,
+  retract_time,
+) -> Bool {
+  interval.is_entirely_after(
+    validity_range,
+    submitted_at + process_time - 1,
+  )
+    && interval.is_entirely_before(
+        validity_range,
+        submitted_at + process_time + retract_time,
+      )
+}
+
+/// Check if a request is rejectable: Phase 3 (retract expired) or
+/// dishonest (submitted_at is in the future).
+fn is_rejectable(
+  validity_range,
+  submitted_at,
+  process_time,
+  retract_time,
+) -> Bool {
+  // Phase 3: retract window expired
+  interval.is_entirely_after(
+    validity_range,
+    submitted_at + process_time + retract_time - 1,
+  )
+    // OR dishonest: submitted_at is in the future
+    || interval.is_entirely_before(validity_range, submitted_at)
 }
 
 /// Create an update function for folding requests into the MPF.
@@ -502,7 +561,7 @@ fn uncons(list: List<a>, cont: fn(a, List<a>) -> b) -> b {
 /// - Request with Insert on existing key -> mpf.insert fails
 /// - Request with Delete on non-existent key -> mpf.delete fails
 /// - Request with Update with wrong old value -> mpf.update fails
-fn mkUpdate(tokenId, max_fee) {
+fn mkUpdate(tokenId, max_fee, process_time, validity_range) {
   fn(
     input: Input,
     acc: (
@@ -524,10 +583,13 @@ fn mkUpdate(tokenId, max_fee) {
             requestValue,
             requestOwner,
             fee,
+            submitted_at,
           } = request
           if requestToken == tokenId {
             // Fee must match the state's max_fee
             expect fee == max_fee
+            // Request must be in Phase 1
+            expect in_phase1(validity_range, submitted_at, process_time)
             let (root, proofs, refunds) = acc
             let proof, proofsTail <- uncons(proofs)
             let newRoot =
@@ -647,8 +709,9 @@ fn validRootUpdate(
   tokenId: TokenId,
   tx: Transaction,
   proofs: List<Proof>,
+  process_time: Int,
 ) {
-  let Transaction { outputs, inputs, .. } = tx
+  let Transaction { outputs, inputs, validity_range, .. } = tx
   let State { root, max_fee, .. } = state
   expect Some(output) = head(outputs)
   expect InlineDatum(state) = output.datum
@@ -656,12 +719,102 @@ fn validRootUpdate(
 
   let (expectedNewRoot, _, refunds) =
     inputs
-      |> foldl((mpf.from_root(root), proofs, []), mkUpdate(tokenId, max_fee))
+      |> foldl(
+          (mpf.from_root(root), proofs, []),
+          mkUpdate(tokenId, max_fee, process_time, validity_range),
+        )
   expect (mpf.root(expectedNewRoot) == newRoot)?
   expect
     output.address.payment_credential == input.output.address.payment_credential
 
   // Verify refund outputs (starting after the State UTxO at index 0)
+  expect [_, ..refundOutputs] = outputs
+  let orderedRefunds = list.reverse(refunds)
+  expect verifyRefunds(refundOutputs, orderedRefunds)
+  True
+}
+
+/// Create a reject function for folding over inputs to collect refunds.
+/// Like mkUpdate but: no proofs, no MPF operations, is_rejectable check.
+fn mkReject(
+  tokenId,
+  max_fee,
+  process_time,
+  retract_time,
+  validity_range,
+) {
+  fn(input: Input, refunds: List<Pair<VerificationKeyHash, Int>>) {
+    when input.output.datum is {
+      InlineDatum(datum) ->
+        if datum is RequestDatum(request): CageDatum {
+          let Request {
+            requestToken,
+            requestOwner,
+            fee,
+            submitted_at,
+            ..
+          } = request
+          if requestToken == tokenId {
+            expect fee == max_fee
+            expect
+              is_rejectable(
+                validity_range,
+                submitted_at,
+                process_time,
+                retract_time,
+              )
+            let inputLovelace = assets.lovelace_of(input.output.value)
+            let refundAmount = inputLovelace - fee
+            if refundAmount > 0 {
+              [Pair(requestOwner, refundAmount), ..refunds]
+            } else {
+              refunds
+            }
+          } else {
+            refunds
+          }
+        } else {
+          refunds
+        }
+      _ -> refunds
+    }
+  }
+}
+
+/// Validate a Reject operation: discard expired/dishonest requests.
+/// Root MUST NOT change. Refunds enforced for each rejected request.
+fn validReject(
+  state: State,
+  input: Input,
+  tokenId: TokenId,
+  tx: Transaction,
+  process_time: Int,
+  retract_time: Int,
+) {
+  let Transaction { outputs, inputs, validity_range, .. } = tx
+  let State { root, max_fee, .. } = state
+
+  expect Some(output) = head(outputs)
+  expect InlineDatum(outState) = output.datum
+  expect StateDatum(State { root: newRoot, .. }) = outState
+  expect newRoot == root
+
+  expect
+    output.address.payment_credential == input.output.address.payment_credential
+
+  let refunds =
+    inputs
+      |> foldl(
+          [],
+          mkReject(
+            tokenId,
+            max_fee,
+            process_time,
+            retract_time,
+            validity_range,
+          ),
+        )
+
   expect [_, ..refundOutputs] = outputs
   let orderedRefunds = list.reverse(refunds)
   expect verifyRefunds(refundOutputs, orderedRefunds)
@@ -803,6 +956,20 @@ pub fn validateMigration(
 // Tests
 // ============================================================================
 
+// Test time params: 10s process window, 10s retract window
+const testProcessTime = 10_000
+
+const testRetractTime = 10_000
+
+// Phase 1 validity range: [0, 5_000] — entirely before submitted_at(0) + process_time(10_000)
+const phase1Range = interval.between(0, 5_000)
+
+// Phase 2 validity range: [10_000, 15_000] — after process_time, before process_time + retract_time
+const phase2Range = interval.between(10_000, 15_000)
+
+// Phase 3 validity range: [20_000, 25_000] — after process_time + retract_time
+const phase3Range = interval.between(20_000, 25_000)
+
 // Test constants: a script address used for all test UTxOs
 const testScriptAddress = from_script("policy_id")
 
@@ -832,6 +999,7 @@ const aRequest =
       requestValue: Insert("42"),
       requestOwner: "owner",
       fee: 0,
+      submitted_at: 0,
     },
   )
 
@@ -891,21 +1059,30 @@ const output =
 test canCage() {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [output],
       extra_signatories: ["owner"],
       inputs: [update, request],
     },
   ) && mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     Contribute(testStateRef),
     testRequestRef,
-    Transaction { ..transaction.placeholder, inputs: [update, request] },
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      inputs: [update, request],
+    },
   )
 }
 
@@ -960,6 +1137,8 @@ const consumed_utxo =
 test canMint() {
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction {
@@ -988,6 +1167,8 @@ fn mint_tx() -> Transaction {
 test mint_missing_input() fail {
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), inputs: [] },
@@ -997,6 +1178,8 @@ test mint_missing_input() fail {
 test mint_quantity_two() fail {
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction {
@@ -1011,6 +1194,8 @@ test mint_to_wallet() fail {
     Output { ..minted, address: address.from_verification_key("someone") }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), outputs: [wallet_output] },
@@ -1022,6 +1207,8 @@ test mint_to_wrong_script() fail {
     Output { ..minted, address: address.from_script("other_script") }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), outputs: [wrong_output] },
@@ -1038,6 +1225,8 @@ test mint_nonempty_root() fail {
     }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), outputs: [bad_output] },
@@ -1056,12 +1245,15 @@ test mint_request_datum() fail {
             requestValue: Insert("v"),
             requestOwner: "owner",
             fee: 0,
+            submitted_at: 0,
           },
         ),
       ),
     }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), outputs: [bad_output] },
@@ -1072,6 +1264,8 @@ test mint_no_datum() fail {
   let bad_output = Output { ..minted, datum: NoDatum }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(minting),
     "policy_id",
     Transaction { ..mint_tx(), outputs: [bad_output] },
@@ -1085,11 +1279,14 @@ test mint_no_datum() fail {
 test retract_happy() {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     Retract,
     testRequestRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase2Range,
       extra_signatories: ["owner"],
     },
   )
@@ -1098,12 +1295,47 @@ test retract_happy() {
 test retract_wrong_signer() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     Retract,
     testRequestRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase2Range,
       extra_signatories: ["someone_else"],
+    },
+  )
+}
+
+test retract_in_phase1() fail {
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    Some(aRequest),
+    Retract,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      extra_signatories: ["owner"],
+    },
+  )
+}
+
+test retract_in_phase3() fail {
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    Some(aRequest),
+    Retract,
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      extra_signatories: ["owner"],
     },
   )
 }
@@ -1121,14 +1353,21 @@ test contribute_wrong_token() fail {
         requestValue: Insert("42"),
         requestOwner: "owner",
         fee: 0,
+        submitted_at: 0,
       },
     )
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(wrong_request),
     Contribute(testStateRef),
     testRequestRef,
-    Transaction { ..transaction.placeholder, inputs: [update, request] },
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      inputs: [update, request],
+    },
   )
 }
 
@@ -1137,10 +1376,49 @@ test contribute_missing_ref() fail {
     OutputReference { transaction_id: "nonexistent", output_index: 0 }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     Contribute(missing_ref),
     testRequestRef,
-    Transaction { ..transaction.placeholder, inputs: [update, request] },
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      inputs: [update, request],
+    },
+  )
+}
+
+test contribute_in_phase2() fail {
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    Some(aRequest),
+    Contribute(testStateRef),
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase2Range,
+      inputs: [update, request],
+    },
+  )
+}
+
+test contribute_in_phase3() {
+  // Phase 3 is rejectable — Contribute is allowed for Reject tx
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    Some(aRequest),
+    Contribute(testStateRef),
+    testRequestRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      inputs: [update, request],
+    },
   )
 }
 
@@ -1151,11 +1429,14 @@ test contribute_missing_ref() fail {
 test modify_missing_signature() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [output],
       extra_signatories: [],
       inputs: [update, request],
@@ -1171,11 +1452,14 @@ test modify_wrong_address() fail {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [bad_output],
       extra_signatories: ["owner"],
       inputs: [update, request],
@@ -1187,11 +1471,14 @@ test modify_owner_transfer() {
   // output already has owner: "new-owner", this should succeed
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [output],
       extra_signatories: ["owner"],
       inputs: [update, request],
@@ -1212,11 +1499,14 @@ test modify_no_requests() {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [unchanged_output],
       extra_signatories: ["owner"],
       inputs: [update],
@@ -1234,6 +1524,7 @@ test modify_skip_other_token() {
         requestValue: Insert("42"),
         requestOwner: "someone",
         fee: 0,
+        submitted_at: 0,
       },
     )
   let other_request =
@@ -1260,11 +1551,14 @@ test modify_skip_other_token() {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [unchanged_output],
       extra_signatories: ["owner"],
       inputs: [update, other_request],
@@ -1276,11 +1570,14 @@ test modify_too_few_proofs() fail {
   // One matching request but zero proofs
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [output],
       extra_signatories: ["owner"],
       inputs: [update, request],
@@ -1292,11 +1589,14 @@ test modify_extra_proofs() {
   // One matching request, two proofs — extra proof is ignored
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[], []]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [output],
       extra_signatories: ["owner"],
       inputs: [update, request],
@@ -1318,12 +1618,34 @@ test modify_wrong_root() fail {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [bad_root_output],
+      extra_signatories: ["owner"],
+      inputs: [update, request],
+    },
+  )
+}
+
+test modify_in_phase2() fail {
+  // Modify should fail when validity range is in Phase 2
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    stateDatum,
+    Modify([[]]),
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase2Range,
+      outputs: [output],
       extra_signatories: ["owner"],
       inputs: [update, request],
     },
@@ -1340,6 +1662,8 @@ const burn_value = from_asset("policy_id", testToken.assetName, -1)
 test end_happy() {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     End,
     testStateRef,
@@ -1355,6 +1679,8 @@ test end_happy() {
 test end_missing_signature() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     End,
     testStateRef,
@@ -1371,6 +1697,8 @@ test end_wrong_token_in_mint() fail {
   let wrong_burn = valueFromToken("policy_id", TokenId { assetName: "wrong" })
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     End,
     testStateRef,
@@ -1390,11 +1718,14 @@ test end_wrong_token_in_mint() fail {
 test retract_on_state_datum() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Retract,
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase2Range,
       extra_signatories: ["owner"],
     },
   )
@@ -1403,11 +1734,14 @@ test retract_on_state_datum() fail {
 test contribute_on_state_datum() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     Contribute(testStateRef),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       inputs: [update],
     },
   )
@@ -1416,11 +1750,14 @@ test contribute_on_state_datum() fail {
 test modify_on_request_datum() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     Modify([]),
     testRequestRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       extra_signatories: ["owner"],
       inputs: [request],
     },
@@ -1430,6 +1767,8 @@ test modify_on_request_datum() fail {
 test end_on_request_datum() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(aRequest),
     End,
     testRequestRef,
@@ -1449,6 +1788,8 @@ test end_on_request_datum() fail {
 test spend_no_datum() fail {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     None,
     Retract,
     testRequestRef,
@@ -1475,15 +1816,19 @@ test prop_retract_requires_owner(
         requestValue: Insert("v"),
         requestOwner: "the_real_owner_key_aaaaaaaaaa",
         fee: 0,
+        submitted_at: 0,
       },
     )
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(req),
     Retract,
     testRequestRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase2Range,
       extra_signatories: [signer],
     },
   )
@@ -1525,11 +1870,14 @@ test prop_modify_requires_owner(
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(StateDatum(s)),
     Modify([]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [unchanged_output],
       extra_signatories: [signer],
       inputs: [state_input],
@@ -1567,6 +1915,8 @@ test prop_mint_roundtrip(
     }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Minting(mint_redeemer),
     "policy_id",
     Transaction {
@@ -1615,6 +1965,8 @@ const migrate_output =
 test canMigrate() {
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Migrating(migrate_redeemer),
     new_policy,
     Transaction {
@@ -1630,6 +1982,8 @@ test migrate_no_burn() fail {
   let mint_no_burn = from_asset(new_policy, migrate_token.assetName, 1)
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Migrating(migrate_redeemer),
     new_policy,
     Transaction {
@@ -1648,6 +2002,8 @@ test migrate_to_wallet() fail {
     }
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Migrating(migrate_redeemer),
     new_policy,
     Transaction {
@@ -1665,6 +2021,8 @@ test migrate_wrong_old_policy() fail {
       |> assets.merge(from_asset(new_policy, migrate_token.assetName, 1))
   mpfCage.mint(
     0,
+    testProcessTime,
+    testRetractTime,
     Migrating(migrate_redeemer),
     new_policy,
     Transaction {
@@ -1696,6 +2054,7 @@ const feeRequest =
       requestValue: Insert("42"),
       requestOwner: "requester_key_aaaaaaaaaaaaaaa",
       fee: testFee,
+      submitted_at: 0,
     },
   )
 
@@ -1748,11 +2107,14 @@ const refundOutput =
 test modify_with_refund() {
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     feeStateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [feeStateOutput, refundOutput],
       extra_signatories: ["owner"],
       inputs: [feeStateInput, feeRequestInput],
@@ -1764,11 +2126,14 @@ test modify_missing_refund() fail {
   // Fee > 0 but no refund output after state output
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     feeStateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [feeStateOutput],
       extra_signatories: ["owner"],
       inputs: [feeStateInput, feeRequestInput],
@@ -1785,11 +2150,14 @@ test modify_insufficient_refund() fail {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     feeStateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [feeStateOutput, bad_refund],
       extra_signatories: ["owner"],
       inputs: [feeStateInput, feeRequestInput],
@@ -1806,11 +2174,14 @@ test modify_wrong_refund_address() fail {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     feeStateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [feeStateOutput, wrong_addr_refund],
       extra_signatories: ["owner"],
       inputs: [feeStateInput, feeRequestInput],
@@ -1830,6 +2201,7 @@ test modify_zero_fee() {
         requestValue: Insert("42"),
         requestOwner: "requester_key_aaaaaaaaaaaaaaa",
         fee: 0,
+        submitted_at: 0,
       },
     )
   let zf_request_input =
@@ -1876,11 +2248,14 @@ test modify_zero_fee() {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     Some(StateDatum(zf_state)),
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [zf_state_output, zf_refund],
       extra_signatories: ["owner"],
       inputs: [zf_state_input, zf_request_input],
@@ -1898,6 +2273,7 @@ test modify_fee_mismatch() fail {
         requestValue: Insert("42"),
         requestOwner: "requester_key_aaaaaaaaaaaaaaa",
         fee: 100_000,
+        submitted_at: 0,
       },
     )
   let mismatch_input =
@@ -1912,11 +2288,14 @@ test modify_fee_mismatch() fail {
     }
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     feeStateDatum,
     Modify([[]]),
     testStateRef,
     Transaction {
       ..transaction.placeholder,
+      validity_range: phase1Range,
       outputs: [feeStateOutput, refundOutput],
       extra_signatories: ["owner"],
       inputs: [feeStateInput, mismatch_input],
@@ -1931,6 +2310,8 @@ test end_with_extra_mint_policy() {
       |> assets.merge(from_asset("other_policy", "other_asset", 1))
   mpfCage.spend(
     0,
+    testProcessTime,
+    testRetractTime,
     stateDatum,
     End,
     testStateRef,
@@ -1939,6 +2320,197 @@ test end_with_extra_mint_policy() {
       extra_signatories: ["owner"],
       inputs: [update],
       mint: extra_mint,
+    },
+  )
+}
+
+// ============================================================================
+// Reject tests
+// ============================================================================
+
+// State output for reject: root MUST NOT change (stays empty)
+const rejectStateOutput =
+  Output {
+    address: testScriptAddress,
+    value: testValue,
+    datum: InlineDatum(
+      StateDatum(
+        State { owner: "owner", root: root(mpf.empty), max_fee: testFee },
+      ),
+    ),
+    reference_script: None,
+  }
+
+test reject_happy() {
+  // Phase 3: retract window expired, oracle can reject and keep fee
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      outputs: [rejectStateOutput, refundOutput],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, feeRequestInput],
+    },
+  )
+}
+
+test reject_in_phase1() fail {
+  // Cannot reject during Phase 1 (oracle processing window)
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      outputs: [rejectStateOutput, refundOutput],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, feeRequestInput],
+    },
+  )
+}
+
+test reject_in_phase2() fail {
+  // Cannot reject during Phase 2 (requester retract window)
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase2Range,
+      outputs: [rejectStateOutput, refundOutput],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, feeRequestInput],
+    },
+  )
+}
+
+test reject_future_submitted_at() {
+  // Dishonest: submitted_at is in the future → immediately rejectable
+  let future_request =
+    RequestDatum(
+      Request {
+        requestToken: testToken,
+        requestKey: "42",
+        requestValue: Insert("42"),
+        requestOwner: "requester_key_aaaaaaaaaaaaaaa",
+        fee: testFee,
+        submitted_at: 100_000,
+      },
+    )
+  let future_request_input =
+    Input {
+      output_reference: testRequestRef,
+      output: Output {
+        address: testScriptAddress,
+        value: from_lovelace(2_000_000),
+        datum: InlineDatum(future_request),
+        reference_script: None,
+      },
+    }
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase1Range,
+      outputs: [rejectStateOutput, refundOutput],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, future_request_input],
+    },
+  )
+}
+
+test reject_missing_signature() fail {
+  // No owner signature
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      outputs: [rejectStateOutput, refundOutput],
+      extra_signatories: [],
+      inputs: [feeStateInput, feeRequestInput],
+    },
+  )
+}
+
+test reject_root_changes() fail {
+  // Root must NOT change during reject
+  let bad_reject_output =
+    Output {
+      address: testScriptAddress,
+      value: testValue,
+      datum: InlineDatum(
+        StateDatum(
+          State {
+            owner: "owner",
+            root: "different_root_aaaaaaaaaaaaa",
+            max_fee: testFee,
+          },
+        ),
+      ),
+      reference_script: None,
+    }
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      outputs: [bad_reject_output, refundOutput],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, feeRequestInput],
+    },
+  )
+}
+
+test reject_wrong_refund() fail {
+  // Insufficient refund amount
+  let bad_refund =
+    Output {
+      ..refundOutput,
+      value: from_lovelace(500_000),
+    }
+  mpfCage.spend(
+    0,
+    testProcessTime,
+    testRetractTime,
+    feeStateDatum,
+    Reject,
+    testStateRef,
+    Transaction {
+      ..transaction.placeholder,
+      validity_range: phase3Range,
+      outputs: [rejectStateOutput, bad_refund],
+      extra_signatories: ["owner"],
+      inputs: [feeStateInput, feeRequestInput],
     },
   )
 }

@@ -136,6 +136,7 @@ pub type MintRedeemer {
 /// | `Contribute`   | `RequestDatum`  | Anyone (permissionless) | Link a request to a State UTxO |
 /// | `Modify`       | `StateDatum`    | State owner             | Fold requests into MPF         |
 /// | `Retract`      | `RequestDatum`  | Request owner           | Reclaim an unprocessed request |
+/// | `Reject`       | `StateDatum`    | State owner             | Discard expired/dishonest reqs |
 ///
 /// ## Test Hints
 /// - Using `End` on a `RequestDatum` UTxO -> should fail (expects StateDatum)
@@ -188,6 +189,11 @@ pub type UpdateRedeemer {
   /// - Retract signed by someone else -> should fail
   /// - Retract on an already-processed request -> impossible (UTxO already consumed)
   Retract
+  /// Discard requests that are past their retract window (Phase 3) or have
+  /// a dishonest (future) `submitted_at` timestamp. Requires State datum.
+  /// The oracle keeps the fee and refunds the remaining lovelace.
+  /// The MPF root MUST NOT change during a Reject operation.
+  Reject
 }
 
 /// The state of a caged token, stored as inline datum.
@@ -325,6 +331,10 @@ pub type Request {
   /// The fee (in lovelace) the requester agrees to pay.
   /// Must match `state.max_fee` at Modify time.
   fee: Int,
+  /// The POSIXTime (in milliseconds) when the request was submitted.
+  /// Used for time-gated phase enforcement: Phase 1 (oracle-only),
+  /// Phase 2 (requester retract), Phase 3 (oracle reject/cleanup).
+  submitted_at: Int,
 }
 
 /// Datum for UTxOs locked at the cage script address.

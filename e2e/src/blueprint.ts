@@ -16,7 +16,11 @@ interface Blueprint {
   }>;
 }
 
-export function loadValidator(version: number) {
+export function loadValidator(
+  version: number,
+  processTime: bigint = 60_000n,
+  retractTime: bigint = 60_000n,
+) {
   const path = process.env.PLUTUS_JSON ?? "/app/plutus.json";
   const raw = readFileSync(path, "utf-8");
   const blueprint: Blueprint = JSON.parse(raw);
@@ -32,12 +36,9 @@ export function loadValidator(version: number) {
     throw new Error("Validator not found in plutus.json");
   }
 
-  const mintScript = applyParamsToScript(mintEntry.compiledCode, [
-    BigInt(version),
-  ]);
-  const spendScript = applyParamsToScript(spendEntry.compiledCode, [
-    BigInt(version),
-  ]);
+  const params = [BigInt(version), processTime, retractTime];
+  const mintScript = applyParamsToScript(mintEntry.compiledCode, params);
+  const spendScript = applyParamsToScript(spendEntry.compiledCode, params);
 
   const mintPolicy: MintingPolicy = {
     type: "PlutusV3",
@@ -57,5 +58,7 @@ export function loadValidator(version: number) {
     spendValidator,
     policyId,
     scriptAddress,
+    processTime,
+    retractTime,
   };
 }

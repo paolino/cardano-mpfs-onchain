@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect } from "vitest";
 import {
+  type Data,
   type LucidEvolution,
   type UTxO,
   fromHex,
@@ -16,6 +17,7 @@ import {
   encodeEndRedeemer,
   encodeModifyRedeemer,
   encodeContributeRedeemer,
+  encodeRejectRedeemer,
 } from "./codec.js";
 
 const COMPLETE_OPTS = { localUPLCEval: false };
@@ -33,6 +35,7 @@ interface PendingRequest {
   datum: string;
   fee: bigint;
   lovelace: bigint;
+  submittedAt: bigint;
 }
 
 function computeAssetName(txHash: string, outputIndex: number): string {
@@ -130,6 +133,21 @@ class Cage implements PromiseLike<void> {
     return this;
   }
 
+  reject(): this {
+    this.chain = this.chain.then(() => this.doReject());
+    return this;
+  }
+
+  waitForPhase3(): this {
+    this.chain = this.chain.then(async () => {
+      const processTime = Number(this.validator.processTime);
+      const retractTime = Number(this.validator.retractTime);
+      const waitMs = processTime + retractTime + 1_000;
+      await new Promise((r) => setTimeout(r, waitMs));
+    });
+    return this;
+  }
+
   end(): this {
     this.chain = this.chain.then(() => this.doEnd());
     return this;
@@ -183,6 +201,7 @@ class Cage implements PromiseLike<void> {
   ): Promise<void> {
     const fee = opts?.fee ?? 0n;
     const lovelace = 2_000_000n;
+    const submittedAt = BigInt(Date.now());
     const encode = isDelete
       ? encodeDeleteRequestDatum
       : encodeRequestDatum;
@@ -192,6 +211,7 @@ class Cage implements PromiseLike<void> {
       key,
       value,
       fee,
+      submittedAt,
     );
 
     const tx = await this.lucid
@@ -222,11 +242,12 @@ class Cage implements PromiseLike<void> {
       datum,
       fee,
       lovelace,
+      submittedAt,
     });
   }
 
   private async doModify(newRoot: string): Promise<void> {
-    const proofs = this.pendingRequests.map(() => [] as unknown[]);
+    const proofs = this.pendingRequests.map(() => [] as Data[]);
     const modifyRedeemer = encodeModifyRedeemer(proofs);
     const contributeRedeemer = encodeContributeRedeemer(this.stateUtxo!);
     const newDatum = encodeStateDatum(
@@ -235,8 +256,20 @@ class Cage implements PromiseLike<void> {
       this.maxFee,
     );
 
+    // Phase 1 validity: tx must be entirely before submittedAt + processTime
+    const now = BigInt(Date.now());
+    const deadline = this.pendingRequests.reduce(
+      (min, r) => {
+        const d = r.submittedAt + this.validator.processTime;
+        return d < min ? d : min;
+      },
+      now + this.validator.processTime,
+    );
+
     let txBuilder = this.lucid
       .newTx()
+      .validFrom(Number(now))
+      .validTo(Number(deadline) - 1)
       .collectFrom([this.stateUtxo!], modifyRedeemer)
       .collectFrom(
         this.pendingRequests.map((r) => r.utxo),
@@ -313,6 +346,54 @@ class Cage implements PromiseLike<void> {
     const oldUtxos = await this.lucid.utxosAt(oldValidator.scriptAddress);
     const remaining = oldUtxos.find((u) => u.assets[oldUnit] === 1n);
     expect(remaining).toBeUndefined();
+  }
+
+  private async doReject(): Promise<void> {
+    const rejectRedeemer = encodeRejectRedeemer();
+    const contributeRedeemer = encodeContributeRedeemer(this.stateUtxo!);
+    const sameDatum = encodeStateDatum(
+      this.ownerKeyHash,
+      this.root,
+      this.maxFee,
+    );
+
+    // Phase 3 validity: tx must be entirely after submittedAt + processTime + retractTime
+    const now = BigInt(Date.now());
+
+    let txBuilder = this.lucid
+      .newTx()
+      .validFrom(Number(now))
+      .collectFrom([this.stateUtxo!], rejectRedeemer)
+      .collectFrom(
+        this.pendingRequests.map((r) => r.utxo),
+        contributeRedeemer,
+      )
+      .pay.ToContract(
+        this.validator.scriptAddress,
+        { kind: "inline", value: sameDatum },
+        { [this.unit]: 1n, lovelace: 2_000_000n },
+      );
+
+    // Refund each requester (lovelace minus fee)
+    for (const req of this.pendingRequests) {
+      const refund = req.lovelace - req.fee;
+      if (refund > 0n) {
+        txBuilder = txBuilder.pay.ToAddress(this.walletAddress, {
+          lovelace: refund,
+        });
+      }
+    }
+
+    const tx = await txBuilder
+      .attach.SpendingValidator(this.validator.spendValidator)
+      .addSignerKey(this.ownerKeyHash)
+      .complete(COMPLETE_OPTS);
+
+    await this.submitAndWait(tx);
+
+    this.stateUtxo = await this.findStateUtxo();
+    expect(this.stateUtxo!.datum).toBe(sameDatum);
+    this.pendingRequests = [];
   }
 
   private async doEnd(): Promise<void> {
