@@ -104,15 +104,23 @@ theorem quantity_present
 theorem quantity_wrong_policy
     (p p' : PolicyId) (a : AssetName) (q : Int)
     (hne : p ≠ p') :
-    quantity p a (fromAsset p' a q) = some q → False := by
-  simp [fromAsset, quantity, List.filter]
-  intro h
+    quantity p a (fromAsset p' a q) = none := by
+  simp only [fromAsset, quantity, List.filter]
   simp [show (p' == p) = false from by
-    simp [BEq.beq]; exact fun h => hne h.symm] at h
+    simp [BEq.beq]; exact fun h => hne h.symm]
+
+/-- Looking up with the wrong asset name returns `none`.
+    Mirrors Aiken test `quantity_wrong_asset`. -/
+theorem quantity_wrong_asset
+    (p : PolicyId) (a a' : AssetName) (q : Int)
+    (hne : a ≠ a') :
+    quantity p a (fromAsset p a' q) = none := by
+  simp only [fromAsset, quantity, List.filter]
+  simp [show (a' == a) = false from by
+    simp [BEq.beq]; exact fun h => hne h.symm]
 
 /-- Composing `valueFromToken` with `quantity` yields `some 1`.
-    Mirrors the combination of Aiken tests for `valueFromToken`
-    and `quantity`. -/
+    Mirrors Aiken test `quantity_valueFromToken`. -/
 theorem quantity_valueFromToken
     (p : PolicyId) (a : AssetName) :
     quantity p a (valueFromToken p a) = some 1 := by

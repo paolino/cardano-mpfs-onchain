@@ -149,3 +149,11 @@ test quantity_wrong_asset() {
   let v = from_asset(q_policy, "other_asset", 1)
   quantity(q_policy, v, q_token) == None
 }
+
+/// Composing valueFromToken with quantity yields Some(1).
+/// Mirrors Lean theorem `quantity_valueFromToken`.
+test quantity_valueFromToken() {
+  let pid = "my_policy"
+  let tid = TokenId { assetName: "my_asset" }
+  quantity(pid, valueFromToken(pid, tid), tid) == Some(1)
+}
