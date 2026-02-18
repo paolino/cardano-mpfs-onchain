@@ -85,7 +85,10 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = [ pkgs.aiken ];
+          packages = [
+            pkgs.aiken
+            pkgs.lean4
+          ];
         };
       }
     );
