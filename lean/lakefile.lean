@@ -8,4 +8,4 @@ package mpfsCage where
 
 @[default_target]
 lean_lib MpfsCage where
-  roots := #[`MpfsCage.Phases]
+  roots := #[`MpfsCage.Phases, `MpfsCage.Lib]
