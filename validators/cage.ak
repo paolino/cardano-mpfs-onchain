@@ -2514,3 +2514,115 @@ test reject_wrong_refund() fail {
     },
   )
 }
+
+// ============================================================================
+// Phase property tests (fuzz) — mirror Lean theorems in MpfsCage/Phases.lean
+// ============================================================================
+
+/// Lean: phase1_phase2_exclusive
+/// No validity range can be in both Phase 1 and Phase 2.
+test prop_phase1_phase2_exclusive(
+  params via fuzz.tuple(
+    fuzz.tuple(fuzz.int_between(0, 100_000), fuzz.int_between(1, 50_000)),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.tuple(fuzz.int_between(0, 200_000), fuzz.int_between(1, 50_000))),
+  ),
+) {
+  let ((submitted_at, process_time), (retract_time, (lo, span))) = params
+  let range = interval.between(lo, lo + span)
+  let p1 = in_phase1(range, submitted_at, process_time)
+  let p2 = in_phase2(range, submitted_at, process_time, retract_time)
+  !(p1 && p2)
+}
+
+/// Lean: phase1_phase3_exclusive
+/// Phase 1 and Phase 3 (rejectable via expiry) are mutually exclusive.
+test prop_phase1_phase3_exclusive(
+  params via fuzz.tuple(
+    fuzz.tuple(fuzz.int_between(0, 100_000), fuzz.int_between(1, 50_000)),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.tuple(fuzz.int_between(0, 200_000), fuzz.int_between(1, 50_000))),
+  ),
+) {
+  let ((submitted_at, process_time), (retract_time, (lo, span))) = params
+  let range = interval.between(lo, lo + span)
+  let p1 = in_phase1(range, submitted_at, process_time)
+  let p3 =
+    interval.is_entirely_after(
+      range,
+      submitted_at + process_time + retract_time - 1,
+    )
+  !(p1 && p3)
+}
+
+/// Lean: phase2_phase3_exclusive
+/// Phases 2 and 3 are mutually exclusive.
+test prop_phase2_phase3_exclusive(
+  params via fuzz.tuple(
+    fuzz.tuple(fuzz.int_between(0, 100_000), fuzz.int_between(1, 50_000)),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.tuple(fuzz.int_between(0, 200_000), fuzz.int_between(1, 50_000))),
+  ),
+) {
+  let ((submitted_at, process_time), (retract_time, (lo, span))) = params
+  let range = interval.between(lo, lo + span)
+  let p2 = in_phase2(range, submitted_at, process_time, retract_time)
+  let p3 =
+    interval.is_entirely_after(
+      range,
+      submitted_at + process_time + retract_time - 1,
+    )
+  !(p2 && p3)
+}
+
+/// Lean: phase1_honest_not_rejectable
+/// An honest request (submitted_at <= lo) in Phase 1 cannot be rejected.
+test prop_phase1_honest_not_rejectable(
+  params via fuzz.tuple(
+    fuzz.tuple(fuzz.int_between(0, 100_000), fuzz.int_between(1, 50_000)),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.tuple(fuzz.int_between(0, 200_000), fuzz.int_between(1, 50_000))),
+  ),
+) {
+  let ((submitted_at, process_time), (retract_time, (lo, span))) = params
+  // Enforce honesty: submitted_at <= lo
+  let honest_submitted = if submitted_at <= lo { submitted_at } else { lo }
+  let range = interval.between(lo, lo + span)
+  let p1 = in_phase1(range, honest_submitted, process_time)
+  let rej =
+    is_rejectable(range, honest_submitted, process_time, retract_time)
+  !(p1 && rej)
+}
+
+/// Lean: phase2_honest_not_rejectable
+/// An honest request in Phase 2 cannot be rejected.
+test prop_phase2_honest_not_rejectable(
+  params via fuzz.tuple(
+    fuzz.tuple(fuzz.int_between(0, 100_000), fuzz.int_between(1, 50_000)),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.tuple(fuzz.int_between(0, 200_000), fuzz.int_between(1, 50_000))),
+  ),
+) {
+  let ((submitted_at, process_time), (retract_time, (lo, span))) = params
+  let honest_submitted = if submitted_at <= lo { submitted_at } else { lo }
+  let range = interval.between(lo, lo + span)
+  let p2 =
+    in_phase2(range, honest_submitted, process_time, retract_time)
+  let rej =
+    is_rejectable(range, honest_submitted, process_time, retract_time)
+  !(p2 && rej)
+}
+
+/// Lean: phase_coverage_point
+/// For any single slot [t, t+1) with honest timestamp,
+/// at least one of {Phase 1, Phase 2, rejectable} holds.
+test prop_phase_coverage_point(
+  params via fuzz.tuple(
+    fuzz.int_between(0, 100_000),
+    fuzz.tuple(fuzz.int_between(1, 50_000), fuzz.int_between(1, 50_000)),
+  ),
+) {
+  let (t, (process_time, retract_time)) = params
+  // honest: submitted_at = 0 <= t (always true since t >= 0)
+  let submitted_at = 0
+  let range = interval.between(t, t + 1)
+  let p1 = in_phase1(range, submitted_at, process_time)
+  let p2 = in_phase2(range, submitted_at, process_time, retract_time)
+  let rej = is_rejectable(range, submitted_at, process_time, retract_time)
+  p1 || p2 || rej
+}
